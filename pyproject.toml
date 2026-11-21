@@ -17,6 +17,7 @@ dependencies = [
     "openai>=3.57.0",
     "httpx>=0.28.1",
     "httpx2>=2.16.2",
+    "pyyaml>=6.0.2",
 ]
 
 [dependency-groups]
@@ -25,6 +26,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.8",
     "mypy>=1.13",
+    "types-pyyaml>=6.0.12",
 ]
 
 [tool.uv]
@@ -47,6 +49,9 @@ ignore = ["SIM300"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["DTZ001", "RUF001"]
+# Prompts, copy, and replies May reads are Taiwan Mandarin with full-width punctuation.
+"src/workflows/**" = ["RUF001"]
+"src/domain/compliance.py" = ["RUF001"]
 
 [tool.mypy]
 python_version = "3.12"

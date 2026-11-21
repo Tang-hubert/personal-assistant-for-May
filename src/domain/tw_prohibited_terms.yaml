@@ -1,0 +1,56 @@
+# Taiwan direct-sales prohibited claims (seed list; extend freely).
+# Not legal advice: have someone who knows the regulations review terms and citations.
+# `safe` is the replacement used for Version A; a term without one is deleted.
+version: 1
+categories:
+  medical_claim:
+    law: 藥事法第69條、食品安全衛生管理法第28條
+    terms:
+      - {term: 治療, safe: 保養}
+      - {term: 治癒}
+      - {term: 根治}
+      - {term: 醫治}
+      - {term: 治病}
+      - {term: 療效, safe: 使用感受}
+      - {term: 抗癌}
+      - {term: 防癌}
+      - {term: 降血壓}
+      - {term: 降血糖}
+      - {term: 降血脂}
+      - {term: 消炎}
+      - {term: 止痛}
+      - {term: 排毒}
+      - {term: 改善失眠, safe: 放鬆心情}
+      - {term: 治失眠}
+      - {term: 增強免疫力, safe: 日常保養}
+      - {term: 提升免疫力, safe: 日常保養}
+      - {term: 預防疾病}
+  absolute_claim:
+    law: 公平交易法第21條
+    terms:
+      - {term: 保證有效, safe: 很多人喜歡}
+      - {term: 百分之百有效}
+      - {term: 無副作用}
+      - {term: 最有效}
+      - {term: 立即見效}
+      - {term: 藥到病除}
+      - {term: 神奇功效, safe: 獨特魅力}
+  metaphysical_health:
+    law: 藥事法第69條、公平交易法第21條
+    terms:
+      - {term: 治病磁場}
+      - {term: 磁場療癒}
+      - {term: 能量療癒}
+      - {term: 消災解厄}
+      - {term: 改運}
+  income_claim:
+    law: 多層次傳銷管理法第18條、公平交易法第21條
+    terms:
+      - {term: 保證獲利}
+      - {term: 保證賺錢}
+      - {term: 穩賺不賠}
+      - {term: 穩賺}
+      - {term: 躺著賺}
+      - {term: 月入十萬}
+      - {term: 被動收入}
+      - {term: 輕鬆致富}
