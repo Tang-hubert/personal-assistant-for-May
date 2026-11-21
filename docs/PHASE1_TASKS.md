@@ -4,6 +4,7 @@
 > v1.3 (2026-11-21): Tickets updated per Architect rulings — see `docs/adr/0001`–`0005` and `docs/reviews/2026-11-21-architect-blind-spots.md`.
 > v1.3.1 (2026-11-21): G1–G4 resolved (ADR-0003). Text budget 4,500, free text 850 chars, per-turn 250 tokens, `awaiting_intent` TTL 15 min.
 > v1.3.2 (2026-11-21): T3 rulings D1–D6 (ADR-0003 Amendment). Multimodal 7,500, `audio_duration_s`, photos bypass the budget gate, tenant-level FinOps aggregate exception.
+> v1.3.3 (2026-11-22): T4 Architect rulings. Prohibited-terms dictionary moves into the package (`src/domain/tw_prohibited_terms.yaml`); every Gemini prompt demands Taiwan Mandarin; a batch completes only after the workflow succeeds; follow-ups stick to the artifact's workflow and use the same dual track.
 
 ## T1: Hexagonal Scaffold, Multi-Tenant DB & Cross-Platform Docker Base
 - **Goal**: Establish Python 3.12 project (`uv`, `pydantic-settings`, `SQLAlchemy 2.0 async`, `aiosqlite`, `alembic`, `ruff`, `mypy`, `pytest`, `tzdata`) developing smoothly on Windows and running identically in Linux Docker.
@@ -47,8 +48,10 @@
 - **Goal**: Deliver May's two highest-impact daily workflows (both running as Layer-1 stateless 0-history workflows by default).
 - **Deliverables**:
   - `src/workflows/lecture_digest.py`: Takes kept images from a `media_batch` -> Gemini multimodal (0 prior chat history) -> `BotResponse` (3 plain-Mandarin takeaways + "這場講座的目的/溫馨提醒") -> archives to `knowledge_items` -> opens a clean Layer-2 follow-up session (`recent_turns=[]`, `state_json={"last_artifact_id", "workflow"}`).
-  - `src/domain/compliance.py` + `data/tw_prohibited_terms.yaml`: Deterministic Taiwan direct-sales medical claim keyword scanner.
-  - `src/workflows/sales_copy.py`: Takes 1-3 jewelry/product photos + optional voice/text note -> saves to `knowledge_items` -> returns `BotResponse` with `CopyableBlock` Version A (compliant persuasive, verified 0 prohibited terms) and optional Version B (original intent + legal risk warning), each `body_text` ≤ 1,000 chars. Supports follow-up tone tweaks inside the bounded Layer-2 session opened on completion.
+  - `src/domain/compliance.py` + `src/domain/tw_prohibited_terms.yaml` (ships inside the image, never under the `data/` volume): Deterministic Taiwan direct-sales claim scanner. `sanitize()` replaces longest terms first, runs at most 3 replacement rounds, then deletes any survivor, so it always ends at 0 hits.
+  - Every Gemini prompt starts with the Taiwan tone rule: Traditional Chinese in everyday Taiwan wording, no Mainland terms (視頻, 軟件, 親).
+  - The workflow calls `batch.complete()` only after `knowledge_items` is written and the `BotResponse` is built. On LLM failure the batch stays `awaiting_intent`, so May can tap again within the TTL.
+  - `src/workflows/sales_copy.py`: Takes 1-3 jewelry/product photos + optional voice/text note -> saves to `knowledge_items` -> returns `BotResponse` with `CopyableBlock` Version A (compliant persuasive, verified 0 prohibited terms) and optional Version B (original intent + legal risk warning), each `body_text` ≤ 1,000 chars. Supports follow-up tone tweaks inside the bounded Layer-2 session opened on completion. The follow-up uses the same dual track (May often adds claims there), saves each rewrite as a new `knowledge_items` row, and moves `last_artifact_id` to it.
 - **DoD**: E2E mocked tests pass for both workflows; deterministic compliance scanner catches prohibited terms even if mocked LLM output leaks them; verifies 0 history injection on fresh workflow starts; verifies Layer-1 completion opens exactly one active Layer-2 session holding only `last_artifact_id` + `workflow` (no artifact text in `state_json`); each workflow returns exactly 1 `BotResponse`.
 
 ## T5: Memory Stash ("東西放哪了"), iOS 3-Step Helper & TelegramAdapter Integration

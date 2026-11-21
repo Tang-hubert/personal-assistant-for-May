@@ -115,6 +115,7 @@ Every LLM call MUST stay within a fixed prompt budget regardless of how many mon
    - On completion the result is saved to `knowledge_items`, then a **clean Layer-2 follow-up session is opened (or reset)** with `recent_turns = []` and `state_json = {"last_artifact_id": "...", "workflow": "..."}` — a reference, never the artifact text.
 2. **Layer 2 — Hard-Bounded Active Topic Session (`topic_sessions`)**:
    - Used ONLY for immediate follow-up tweaks (e.g., "把剛剛的文案改得更親切一點").
+   - **Follow-up stickiness**: while the session holds `last_artifact_id` and the classifier reports no topic shift, the message goes to the handler of the session's `topic_type`, whatever route the classifier named. A rewrite saves a new `knowledge_items` row and the router moves `last_artifact_id` to it (`HandlerReply.last_artifact_id`), so the next tweak builds on the latest version.
    - **Invariant after every commit**: `len(recent_turns) <= 6` (3 user + 3 assistant) AND history ≤ 1,500 estimated tokens.
    - **Per-turn cap**: every message written to `recent_turns` is deterministically truncated to ≤ 250 tokens (6 × 250 = 1,500). Full long outputs (copy, reports) live only in `knowledge_items` and reach the prompt through `state_json.last_artifact_id` → `retrieved_context`. They are never duplicated into `recent_turns`.
    - **Auto-Close Triggers**: (a) idle > 15 minutes — evaluated lazily when the next message arrives (no scheduler); (b) `TEXT_FAST_ROUTE` detects topic change; (c) user taps the finish button.
@@ -141,7 +142,8 @@ Every LLM call MUST stay within a fixed prompt budget regardless of how many mon
 | `collecting` | debounce elapsed (or `group_index == group_total`) | `filtered` (image gate run) |
 | `filtered` | ≥ 1 kept image → intent-button `BotResponse` sent | `awaiting_intent` |
 | `filtered` | all images blurry → warm retake `BotResponse` sent | `done` |
-| `awaiting_intent` | intent callback → workflow completes | `done` |
+| `awaiting_intent` | intent callback → workflow completes (knowledge saved, response built) | `done` |
+| `awaiting_intent` | intent callback → workflow fails (LLM error, malformed reply, budget) | `awaiting_intent` (May may tap again within the TTL) |
 | `done` | repeated callback | `done` (idempotent no-op, gentle "已經處理好囉") |
 
 - A new burst arriving while another batch is `awaiting_intent` opens a new batch; callbacks carry `batch_id`, so old buttons stay valid.
@@ -166,7 +168,8 @@ Every LLM call MUST stay within a fixed prompt budget regardless of how many mon
 ## 6. FinOps Guardian & Dual-Track Taiwan Direct-Sales Compliance
 - **FinOps**: Before EVERY LLM call, sum the tenant's ledger for the current Asia/Taipei day. The day boundary is computed in Python with `ZoneInfo("Asia/Taipei")` and converted to a UTC range for the query — never from process local time (ADR-0005). `>= 80%`: warn Discord Ops once per day (guarded by `tenants.budget_alert_80_date`, claimed by a conditional UPDATE before sending, so restarts and races never resend). `>= 100%`: block LLM, return friendly rest message, alert Discord Ops (deduplicated in memory per tenant and Taipei day; a restart may resend it once). The check runs before the call, so concurrent users of one tenant can overshoot by at most one call each (single-process, family scale).
 - **Test isolation**: `tests/conftest.py` autouse fixture forces `APP_ENV=test` + `TEST_NO_SEND=1` and blocks unmocked outbound network at the httpx and httpx2 transports (google-genai and openai ship on httpx2), `socket.connect`, and `asyncio` `create_connection` (the Windows proactor loop bypasses `socket.connect`), so the guard holds even when `pytest` runs without `scripts/test.py`.
-- **Compliance (`src/domain/compliance.py`)**: Deterministic scanner using `data/tw_prohibited_terms.yaml`. Always generate Version A (safe persuasive experience framing, 0 prohibited terms verified post-LLM) + optional Version B (polished original intent with explicit legal risk `warning_note`).
+- **Compliance (`src/domain/compliance.py`)**: Deterministic scanner using `src/domain/tw_prohibited_terms.yaml`. The dictionary ships with the code inside the image; `data/` is the runtime volume and is git-ignored. Always generate Version A (safe persuasive experience framing) + optional Version B (polished original intent with explicit legal risk `warning_note`). Version A always passes scan → `sanitize()` → 0 hits after the LLM, on the initial draft and on every follow-up rewrite. `sanitize()` replaces longest terms first, runs at most 3 rounds, then deletes survivors, so it never raises. Version B is kept only when it is non-empty and contains a prohibited term; its `warning_note` names the terms and laws.
+- **Taiwan tone**: every Gemini prompt requires Traditional Chinese in everyday Taiwan wording and forbids Mainland terms (視頻 → 影片, 軟件 → 軟體, 親 → 您).
 
 ## 7. External Services Matrix (Strict Phase Boundaries)
 - **Phase 1 Runtime (4 APIs Only)**: Telegram Bot API (Long Polling), Google AI Studio Gemini API (Prepaid), DeepSeek API (Prepaid), Discord Ops Webhook.
