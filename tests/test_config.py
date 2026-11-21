@@ -67,3 +67,9 @@ def test_deepseek_uses_conservative_peak_price() -> None:
 def test_price_for_unknown_model_raises() -> None:
     with pytest.raises(KeyError):
         price_for("mystery-model-9", date(2026, 11, 21))
+
+
+def test_photo_gate_defaults() -> None:
+    settings = _settings()
+    assert settings.BLUR_THRESHOLD == 100.0
+    assert settings.BATCH_DEBOUNCE_SECONDS == 5.0

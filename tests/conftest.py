@@ -11,10 +11,11 @@ import httpx
 import pytest
 
 from src.adapters.storage.engine import create_engine
+from src.adapters.storage.media_repository import SqlMediaStore
 from src.adapters.storage.migrate import upgrade_to_head
 from src.adapters.storage.repository import SqlStorage
 from src.config import Settings
-from tests.fakes import FrozenClock
+from tests.fakes import FrozenClock, Owner
 
 _real_connect = socket.socket.connect
 _real_connect_ex = socket.socket.connect_ex
@@ -79,3 +80,24 @@ async def storage(db_path: Path, clock: FrozenClock) -> AsyncIterator[SqlStorage
     engine = create_engine(db_path)
     yield SqlStorage(engine, clock)
     await engine.dispose()
+
+
+@pytest.fixture
+async def media_store(
+    db_path: Path, clock: FrozenClock, tmp_path: Path
+) -> AsyncIterator[SqlMediaStore]:
+    engine = create_engine(db_path)
+    yield SqlMediaStore(engine, clock, tmp_path / "data")
+    await engine.dispose()
+
+
+@pytest.fixture
+async def owner(storage: SqlStorage) -> Owner:
+    tenant_id = await storage.create_tenant(name="May")
+    return Owner(tenant_id, await storage.create_user(tenant_id=tenant_id, display_name="May"))
+
+
+@pytest.fixture
+async def other_owner(storage: SqlStorage) -> Owner:
+    tenant_id = await storage.create_tenant(name="Other")
+    return Owner(tenant_id, await storage.create_user(tenant_id=tenant_id, display_name="Other"))

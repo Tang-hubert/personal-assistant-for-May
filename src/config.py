@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     DISCORD_OPS_WEBHOOK_URL: SecretStr
     DEFAULT_DAILY_BUDGET_USD: Decimal = Decimal("0.20")
     DATA_DIR: Path = Path("data")
+    BLUR_THRESHOLD: float = 100.0
+    BATCH_DEBOUNCE_SECONDS: float = 5.0
 
     @field_validator("TELEGRAM_ALLOWED_USER_IDS", mode="before")
     @classmethod

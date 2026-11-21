@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from src.domain.media import Intent, encode_callback, intent_prompt, parse_callback
 from src.domain.models import (
     ActionButton,
     BotResponse,
@@ -119,3 +120,18 @@ def test_models_are_immutable() -> None:
     response = BotResponse(title="t")
     with pytest.raises(ValidationError):
         response.title = "changed"  # type: ignore[misc]
+
+
+def test_intent_buttons_fit_the_channel_limits() -> None:
+    response = intent_prompt("a" * 32, kept_count=4)
+    assert len(response.actions) == 3
+    assert all(len(a.label) <= 20 for a in response.actions)
+    assert all(len(a.callback_data.encode()) <= 64 for a in response.actions)
+    assert all("a" * 32 in a.callback_data for a in response.actions)
+
+
+def test_callback_round_trips_and_rejects_junk() -> None:
+    for intent in Intent:
+        assert parse_callback(encode_callback("b" * 32, intent)) == ("b" * 32, intent)
+    for junk in ("", "x:1:lecture", "b:abc", "b:abc:unknown", "b::lecture", "b:a:b:lecture"):
+        assert parse_callback(junk) is None
