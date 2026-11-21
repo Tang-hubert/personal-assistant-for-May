@@ -31,6 +31,8 @@ CeilingVerdict = Literal["ok", "extract", "force_close"]
 
 IDLE_TIMEOUT = timedelta(minutes=15)
 SLOTS_KEY = "slots"
+ARTIFACT_KEY = "last_artifact_id"  # Layer-2 reference to a knowledge_items row (ADR-0003)
+WORKFLOW_KEY = "workflow"
 
 
 MAX_FACTS = 5

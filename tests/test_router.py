@@ -51,13 +51,16 @@ class FakeHandler:
     name: str
     contexts: list[TurnContext] = field(default_factory=list)
     error: Exception | None = None
+    artifact_id: str | None = None
 
     async def __call__(self, ctx: TurnContext) -> HandlerReply:
         self.contexts.append(ctx)
         if self.error is not None:
             raise self.error
         return HandlerReply(
-            text=f"{self.name}:{ctx.user_text}", response=BotResponse(title=self.name)
+            text=f"{self.name}:{ctx.user_text}",
+            response=BotResponse(title=self.name),
+            last_artifact_id=self.artifact_id,
         )
 
 
@@ -456,3 +459,19 @@ async def test_a_broken_ops_webhook_at_80_percent_still_answers(rig: Rig) -> Non
     )
 
     assert await rig.router.handle(rig.text("翡翠放哪")) == BotResponse(title="general")
+
+
+async def test_handler_artifact_id_is_committed_into_state_json(rig: Rig) -> None:
+    who = {"tenant_id": rig.owner.tenant_id, "user_id": rig.owner.user_id}
+    await rig.sessions.open_fresh(
+        **who, topic_type="sales", state_json={"last_artifact_id": "old", "workflow": "sales_copy"}
+    )
+    rig.sales.artifact_id = "new"
+
+    await rig.router.handle(rig.text("改親切一點"))  # classifier says general: sticks to sales
+
+    assert len(rig.sales.contexts) == 1 and rig.general.contexts == []
+    after = await rig.sessions.get_active(**who)
+    assert after is not None
+    assert after.state_json == {"last_artifact_id": "new", "workflow": "sales_copy"}
+    assert len(after.recent_turns) == 2

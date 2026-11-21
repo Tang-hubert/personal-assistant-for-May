@@ -33,6 +33,7 @@ from src.domain.ports import (
     SessionStorePort,
 )
 from src.domain.session import (
+    ARTIFACT_KEY,
     SessionSlots,
     TopicSessionState,
     TopicType,
@@ -90,6 +91,7 @@ class HandlerReply(BaseModel):
 
     text: str  # committed to recent_turns as the assistant turn (truncated to 250 tokens)
     response: BotResponse
+    last_artifact_id: str | None = None  # a rewrite's new knowledge item; later follow-ups use it
 
 
 class RouteHandler(Protocol):
@@ -206,10 +208,19 @@ class Router:
             # Saved at once so a failing handler cannot lead to a second extraction.
             await self._sessions.save(tenant_id=tenant_id, user_id=user_id, state=session)
 
-        handler = self._handlers.get(decision.route, self._handlers["general"])
+        route = decision.route
+        if not decision.topic_shift and ARTIFACT_KEY in session.state_json:
+            # A follow-up such as "改親切一點" belongs to the workflow that made the artifact,
+            # whatever the classifier called it.
+            route = session.topic_type
+        handler = self._handlers.get(route, self._handlers["general"])
         reply = await handler(
-            TurnContext(event=event, route=decision.route, session=session, user_text=text)
+            TurnContext(event=event, route=route, session=session, user_text=text)
         )
+        if reply.last_artifact_id is not None:
+            session = session.evolve(
+                state_json={**session.state_json, ARTIFACT_KEY: reply.last_artifact_id}
+            )
         await self._sessions.save(
             tenant_id=tenant_id, user_id=user_id, state=commit_turn(session, text, reply.text, now)
         )
