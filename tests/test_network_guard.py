@@ -8,6 +8,7 @@ import pytest
 from google import genai
 from openai import AsyncOpenAI
 
+from src.adapters.errors import NetworkBlockedError
 from src.config import DEEPSEEK_BASE_URL
 
 
@@ -19,6 +20,12 @@ def test_env_is_forced_to_test_mode() -> None:
 def test_sync_httpx_call_is_blocked() -> None:
     with pytest.raises(RuntimeError, match="Network blocked"):
         httpx.get("https://example.com")
+
+
+def test_the_guard_raises_its_own_runtime_error_subclass() -> None:
+    with pytest.raises(NetworkBlockedError) as caught:
+        socket.create_connection(("1.1.1.1", 443), timeout=1)
+    assert isinstance(caught.value, RuntimeError)
 
 
 async def test_async_httpx_call_is_blocked() -> None:

@@ -6,6 +6,7 @@ import pytest
 from pydantic import SecretStr
 
 from src.adapters.discord_ops.notifier import DiscordWebhookNotifier
+from src.adapters.errors import NetworkBlockedError
 
 WEBHOOK = "https://discord.invalid/api/webhooks/1/secret"
 
@@ -54,8 +55,20 @@ async def test_discord_failure_is_logged_not_raised(caplog: pytest.LogCaptureFix
 
 
 async def test_unmocked_webhook_hits_the_network_guard() -> None:
-    with pytest.raises(RuntimeError, match="Network blocked"):
+    with pytest.raises(NetworkBlockedError, match="Network blocked"):
         await _notifier().notify("error", "hello")
+
+
+async def test_a_closed_client_at_shutdown_is_logged_not_raised(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(204)))
+    await client.aclose()
+    with caplog.at_level(logging.ERROR):
+        await DiscordWebhookNotifier(SecretStr(WEBHOOK), client).notify("error", "bye")
+
+    assert "RuntimeError" in caplog.text
+    assert "secret" not in caplog.text
 
 
 async def test_an_unparseable_webhook_url_is_logged_not_raised(

@@ -9,6 +9,8 @@ from typing import Literal
 import httpx
 from pydantic import SecretStr
 
+from src.adapters.errors import NetworkBlockedError
+
 logger = logging.getLogger(__name__)
 
 DISCORD_CONTENT_MAX_CHARS = 2000
@@ -29,8 +31,8 @@ class DiscordWebhookNotifier:
                 timeout=TIMEOUT_S,
             )
             response.raise_for_status()
-        except RuntimeError:
-            # The test network guard raises RuntimeError; an unmocked send must fail loudly.
+        except NetworkBlockedError:
+            # An unmocked send in tests must fail loudly.
             raise
         except Exception as err:
             # str(err) embeds the webhook URL, which is itself the credential.

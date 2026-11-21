@@ -15,6 +15,7 @@ import httpx
 import httpx2
 import pytest
 
+from src.adapters.errors import NetworkBlockedError
 from src.adapters.storage.engine import create_engine
 from src.adapters.storage.ledger_repository import SqlLedger
 from src.adapters.storage.media_repository import SqlMediaStore
@@ -34,7 +35,7 @@ _real_sendmsg = getattr(socket.socket, "sendmsg", None)  # absent on Windows
 
 
 def _blocked(*_args: Any, **_kwargs: Any) -> Any:
-    raise RuntimeError("Network blocked in tests (TEST_NO_SEND=1): mock this call")
+    raise NetworkBlockedError("Network blocked in tests (TEST_NO_SEND=1): mock this call")
 
 
 def _is_local(address: Any) -> bool:
