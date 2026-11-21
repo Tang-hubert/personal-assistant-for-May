@@ -178,7 +178,7 @@ class MediaAsset(Base):
         return value
 
 
-KNOWLEDGE_CATEGORIES = ("jewelry", "product", "lecture", "item_location", "crm")
+KNOWLEDGE_CATEGORIES = ("jewelry", "product", "lecture", "item_location", "crm", "ios_guide")
 
 
 class KnowledgeItemRow(Base):

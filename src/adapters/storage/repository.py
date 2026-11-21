@@ -4,12 +4,25 @@ except identity resolution, which is how those IDs are obtained (ADR-0001)."""
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import bindparam, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from src.adapters.storage.orm import ChannelIdentity, KnowledgeItemRow, Tenant, User
-from src.domain.models import Channel, KnowledgeItem, NewKnowledgeItem, ResolvedIdentity
+from src.adapters.storage.orm import (
+    KNOWLEDGE_CATEGORIES,
+    ChannelIdentity,
+    KnowledgeItemRow,
+    Tenant,
+    User,
+)
+from src.domain.models import (
+    Channel,
+    KnowledgeCategory,
+    KnowledgeItem,
+    NewKnowledgeItem,
+    ResolvedIdentity,
+)
 from src.domain.ports import Clock
 from src.domain.search_tokens import build_match_query, build_search_tokens
 
@@ -21,10 +34,11 @@ _SEARCH_SQL = text(
     WHERE knowledge_items_fts MATCH :match
       AND knowledge_items.tenant_id = :tenant_id
       AND knowledge_items.user_id = :user_id
+      AND knowledge_items.category IN :categories
     ORDER BY bm25(knowledge_items_fts)
     LIMIT :limit
     """
-)
+).bindparams(bindparam("categories", expanding=True))
 
 
 def _to_domain(row: KnowledgeItemRow) -> KnowledgeItem:
@@ -133,8 +147,44 @@ class SqlStorage:
             ).scalar_one_or_none()
         return None if row is None else _to_domain(row)
 
+    async def update_knowledge(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        item_id: str,
+        title: str,
+        content_text: str,
+        structured_json: dict[str, Any],
+        keywords: Sequence[str] = (),
+    ) -> bool:
+        # The AFTER UPDATE OF search_tokens trigger (0002) re-indexes the row.
+        async with self._sessions() as session:
+            result = await session.execute(
+                update(KnowledgeItemRow)
+                .where(
+                    KnowledgeItemRow.id == item_id,
+                    KnowledgeItemRow.tenant_id == tenant_id,
+                    KnowledgeItemRow.user_id == user_id,
+                )
+                .values(
+                    title=title,
+                    content_text=content_text,
+                    structured_json=structured_json,
+                    search_tokens=build_search_tokens(f"{title} {content_text}", keywords),
+                )
+            )
+            await session.commit()
+        return bool(result.rowcount)  # type: ignore[attr-defined]
+
     async def search_knowledge(
-        self, *, tenant_id: str, user_id: str, query: str, limit: int = 3
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        query: str,
+        limit: int = 3,
+        categories: Sequence[KnowledgeCategory] | None = None,
     ) -> list[KnowledgeItem]:
         match = build_match_query(query)
         if match is None:
@@ -149,6 +199,9 @@ class SqlStorage:
                             "tenant_id": tenant_id,
                             "user_id": user_id,
                             "limit": limit,
+                            "categories": list(
+                                KNOWLEDGE_CATEGORIES if categories is None else categories
+                            ),
                         },
                     )
                 )

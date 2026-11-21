@@ -99,3 +99,79 @@ async def test_fts_syntax_in_query_never_breaks(storage: SqlStorage, query: str)
     await storage.save_knowledge(tenant_id=tenant_id, user_id=user_id, item=_item("翡翠放紅櫃子"))
     hits = await storage.search_knowledge(tenant_id=tenant_id, user_id=user_id, query=query)
     assert isinstance(hits, list)
+
+
+async def test_a_category_filter_hides_sales_copy_that_mentions_the_word(
+    storage: SqlStorage,
+) -> None:
+    tenant_id, user_id = await _person(storage)
+    place_id = await storage.save_knowledge(
+        tenant_id=tenant_id, user_id=user_id, item=_item("翡翠放紅櫃子")
+    )
+    await storage.save_knowledge(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        item=NewKnowledgeItem(category="jewelry", title="翡翠手鍊", content_text="翡翠溫潤好看"),
+    )
+
+    filtered = await storage.search_knowledge(
+        tenant_id=tenant_id, user_id=user_id, query="翡翠", categories=["item_location"]
+    )
+    everything = await storage.search_knowledge(tenant_id=tenant_id, user_id=user_id, query="翡翠")
+
+    assert [hit.id for hit in filtered] == [place_id]
+    assert len(everything) == 2
+
+
+async def test_update_moves_the_item_to_its_new_place_in_the_index(storage: SqlStorage) -> None:
+    tenant_id, user_id = await _person(storage)
+    item_id = await storage.save_knowledge(
+        tenant_id=tenant_id, user_id=user_id, item=_item("翡翠放藍盒子"), keywords=["藍盒子"]
+    )
+
+    assert await storage.update_knowledge(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        item_id=item_id,
+        title="翡翠",
+        content_text="翡翠｜紅櫃子第二層",
+        structured_json={"item": "翡翠", "location": "紅櫃子第二層"},
+        keywords=["翡翠", "紅櫃子"],
+    )
+
+    new_place = await storage.search_knowledge(tenant_id=tenant_id, user_id=user_id, query="紅櫃子")
+    old_place = await storage.search_knowledge(tenant_id=tenant_id, user_id=user_id, query="藍盒子")
+    assert [hit.id for hit in new_place] == [item_id]
+    assert old_place == []
+    item = await storage.get_knowledge(tenant_id=tenant_id, user_id=user_id, item_id=item_id)
+    assert item is not None
+    assert item.structured_json["location"] == "紅櫃子第二層"
+    assert item.title == "翡翠"
+
+
+async def test_another_owner_can_neither_update_nor_find_the_item(storage: SqlStorage) -> None:
+    tenant_id, user_id = await _person(storage)
+    other_tenant, other_user = await _person(storage)
+    same_tenant_user = await storage.create_user(tenant_id=tenant_id, display_name="Sis")
+    item_id = await storage.save_knowledge(
+        tenant_id=tenant_id, user_id=user_id, item=_item("翡翠放紅櫃子")
+    )
+
+    for owner in ((other_tenant, other_user), (tenant_id, same_tenant_user)):
+        assert not await storage.update_knowledge(
+            tenant_id=owner[0],
+            user_id=owner[1],
+            item_id=item_id,
+            title="x",
+            content_text="珍珠",
+            structured_json={},
+            keywords=(),
+        )
+        assert (
+            await storage.search_knowledge(
+                tenant_id=owner[0], user_id=owner[1], query="翡翠", categories=["item_location"]
+            )
+            == []
+        )
+    hits = await storage.search_knowledge(tenant_id=tenant_id, user_id=user_id, query="翡翠")
+    assert [hit.id for hit in hits] == [item_id]

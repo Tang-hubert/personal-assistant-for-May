@@ -11,7 +11,7 @@ Channel = Literal["telegram", "line"]
 EventType = Literal["text", "audio", "image", "action_callback", "unsupported"]
 ChatAction = Literal["typing", "upload_photo"]
 Priority = Literal["reply", "proactive_critical", "proactive_digest"]
-KnowledgeCategory = Literal["jewelry", "product", "lecture", "item_location", "crm"]
+KnowledgeCategory = Literal["jewelry", "product", "lecture", "item_location", "crm", "ios_guide"]
 
 ALT_TEXT_MAX_CHARS = 400
 CALLBACK_DATA_MAX_BYTES = 64

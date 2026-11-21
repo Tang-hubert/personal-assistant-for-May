@@ -22,6 +22,7 @@ from src.domain.models import (
     BotResponse,
     Channel,
     ChatAction,
+    KnowledgeCategory,
     KnowledgeItem,
     NewKnowledgeItem,
     ReplyTarget,
@@ -160,9 +161,31 @@ class StoragePort(Protocol):
         self, *, tenant_id: str, user_id: str, item_id: str
     ) -> KnowledgeItem | None: ...
 
+    async def update_knowledge(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        item_id: str,
+        title: str,
+        content_text: str,
+        structured_json: dict[str, Any],
+        keywords: Sequence[str] = (),
+    ) -> bool:
+        """Rewrite one item in place and re-index it. False when this owner has no such item."""
+        ...
+
     async def search_knowledge(
-        self, *, tenant_id: str, user_id: str, query: str, limit: int = 3
-    ) -> list[KnowledgeItem]: ...
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        query: str,
+        limit: int = 3,
+        categories: Sequence[KnowledgeCategory] | None = None,
+    ) -> list[KnowledgeItem]:
+        """Best FTS matches first; `categories` restricts the hits to those categories."""
+        ...
 
 
 class MediaStorePort(Protocol):
