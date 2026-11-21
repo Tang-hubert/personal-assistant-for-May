@@ -20,14 +20,14 @@ v1.2 had five problems in the session and budget rules:
    | Call kind | Total | Slots |
    | :--- | :--- | :--- |
    | Text / follow-up | ≤ 4,500 | system ≤ 500, state_json ≤ 250, retrieved_context ≤ 1,200, recent_turns ≤ 1,500, current_user_msg ≤ 1,050 |
-   | Multimodal | ≤ 6,000 | ≤ 6 images; voice ≤ 120 s (rejected gently before LLM); free text ≤ 850 chars |
+   | Multimodal | ≤ 7,500 (was 6,000; see Amendment) | ≤ 6 images; voice ≤ 120 s (rejected gently before LLM); free text ≤ 850 chars |
 
    `retrieved_context` is shared. A follow-up puts the truncated `last_artifact_id` text there; a memory query puts the Layer-3 top-3 there (G1). Free text over 850 chars is deterministically truncated with a gentle notice, since 850 × 1.2 = 1,020 ≤ 1,050 (G3).
 
 4. **No recursive compaction**:
    - After every commit, `len(recent_turns) <= 6` AND history ≤ 1,500 tokens.
    - On the first ceiling hit, run one slot extraction via `TEXT_FAST_ROUTE`, validated by a fixed Pydantic schema and deterministically truncated to ≤ 250 tokens. It is never sent back to an LLM for rewriting. Old turns are dropped.
-   - `extraction_count <= 1`. A second ceiling hit force-closes the session and invites May to start a new topic.
+   - `extraction_count <= 1`: at most one *successful* extraction per session. A call that returns no response (both providers unavailable) is not an extraction; it stores nothing, bills nothing, and the next message at the ceiling may try again. A second ceiling hit after a successful extraction force-closes the session and invites May to start a new topic.
 5. **Routing priority**:
    1. Budget at 100% → fixed rest message (0 LLM).
    2. Button callbacks and photo batches → deterministic routing (0 LLM).
@@ -45,10 +45,10 @@ v1.2 had five problems in the session and budget rules:
 
 ## Invariants
 1. After every commit, `len(recent_turns) <= 6` and history ≤ 1,500 estimated tokens.
-2. `extraction_count <= 1` per session.
+2. `extraction_count <= 1` per session (at most one successful extraction).
 3. `len(state_json) <= 250` estimated tokens, schema-valid.
 4. At most one `active` session per `(tenant_id, user_id)`.
-5. Every LLM call's assembled prompt fits its budget row (≤ 4,500 text, ≤ 6,000 multimodal) before dispatch.
+5. Every LLM call's assembled prompt fits its budget row (≤ 4,500 text, ≤ 7,500 multimodal) before dispatch.
 6. Callback and photo-batch routing make zero LLM calls.
 7. Every message in `recent_turns` is ≤ 250 estimated tokens.
 8. Free text entering a prompt is ≤ 850 chars.
@@ -71,6 +71,15 @@ Original statements, kept for traceability:
 - **G4 — `awaiting_intent` TTL**: how long intent buttons on a photo batch stay valid is not ruled.
 
 T2 implements G4. T3 and T4 implement G1–G3.
+
+## Amendment (T3 rulings D1–D6, 2026-11-21)
+- **D5 multimodal budget**: Gemini 3 bills 1,120 tokens per image at its default resolution, so 6 images (6,720) already exceeded 6,000. The adapter fixes `MEDIA_RESOLUTION_MEDIUM` (560 per image), audio is estimated at a conservative 32 tokens per second, and the multimodal total rises to **7,500**. Worst Phase-1 case: 3 images + 120 s voice + system 500 + user message 1,050 = 7,070, so T4 needs no extra cap.
+- **D1 photos at 100% budget**: photo events skip the budget gate (they make 0 LLM calls), because a rest message per photo would break ADR-0002. The intent callback is gated instead.
+- **D2 tenant-level aggregate**: the FinOps ledger sum, daily budget, and 80% alert claim are scoped by `tenant_id` only. This is the third documented exception to the `tenant_id` + `user_id` query rule (ARCHITECTURE §5).
+- **D3 100% alert**: deduplicated in memory per tenant and Taipei day. No migration; a restart may resend it once. The 80% alert stays persisted.
+- **D4 voice length**: `IncomingEvent.audio_duration_s` (required for audio, > 0) comes from platform metadata, so Decision 3's 120 s rejection happens before any LLM call.
+- **D6 second ceiling hit**: the session closes and the message gets the fixed "start a new topic" reply. No handler or extraction call runs for it. The message still pays the one `TEXT_FAST_ROUTE` classification that every free-text message pays, because classification runs before the ceiling check: a message that is really a topic shift opens a fresh session and is answered instead of being force-closed. The next message starts a clean session.
+- **G failed extraction**: an extraction call that raises (both providers unavailable) is not counted; the next message at the ceiling may try again. `extraction_count` counts successful extractions only.
 
 ## Verification
 - T3 DoD (c), (d), (g), (h), (i), (j): extraction-once, idle/topic reset with a frozen `Clock`, 0-LLM callbacks, concurrent single active session, fail-fast prices, voice rejection.

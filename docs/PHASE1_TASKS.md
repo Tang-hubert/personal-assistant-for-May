@@ -3,6 +3,7 @@
 > Rule: Execute ONE ticket per Claude Code session. Verify tests + `/interrogate` + `/teach`, commit cleanly (never commit `.env`), then run `/clear`.
 > v1.3 (2026-11-21): Tickets updated per Architect rulings — see `docs/adr/0001`–`0005` and `docs/reviews/2026-11-21-architect-blind-spots.md`.
 > v1.3.1 (2026-11-21): G1–G4 resolved (ADR-0003). Text budget 4,500, free text 850 chars, per-turn 250 tokens, `awaiting_intent` TTL 15 min.
+> v1.3.2 (2026-11-21): T3 rulings D1–D6 (ADR-0003 Amendment). Multimodal 7,500, `audio_duration_s`, photos bypass the budget gate, tenant-level FinOps aggregate exception.
 
 ## T1: Hexagonal Scaffold, Multi-Tenant DB & Cross-Platform Docker Base
 - **Goal**: Establish Python 3.12 project (`uv`, `pydantic-settings`, `SQLAlchemy 2.0 async`, `aiosqlite`, `alembic`, `ruff`, `mypy`, `pytest`, `tzdata`) developing smoothly on Windows and running identically in Linux Docker.
@@ -34,7 +35,7 @@
   - `src/adapters/llm/router_llm.py`: Routes by `TaskCapability` (`MULTIMODAL_*`/`COPYWRITING_TW` -> Gemini; `TEXT_FAST_ROUTE` -> DeepSeek) with `HTTP 402/429` graceful handling.
   - `src/pipeline/finops_guardian.py`: Logs every call to `llm_usage_ledger` with cost from the config price table; Taipei day computed via `ZoneInfo` → UTC range; Discord Ops warning at 80% once per day (persisted in `tenants.budget_alert_80_date`); hard block at 100%.
   - `src/domain/router.py`: Implements the **3-Layer Bounded Context Law** (ARCHITECTURE §4):
-    - Token estimator `ceil(len(text) * 1.2)`; prompt budget table enforced before every call (text ≤ 4,500 with slots system 500 / state_json 250 / retrieved_context 1,200 / recent_turns 1,500 / current_user_msg 1,050; multimodal ≤ 6,000; ≤ 6 images; voice ≤ 120 s rejected before LLM; free text deterministically truncated to 850 chars with a gentle notice; every `recent_turns` message truncated to ≤ 250 tokens).
+    - Token estimator `ceil(len(text) * 1.2)`; prompt budget table enforced before every call (text ≤ 4,500 with slots system 500 / state_json 250 / retrieved_context 1,200 / recent_turns 1,500 / current_user_msg 1,050; multimodal ≤ 7,500 with images at 560 tokens (`MEDIA_RESOLUTION_MEDIUM`) and audio at 32 tokens/s; ≤ 6 images; voice ≤ 120 s rejected before LLM using `IncomingEvent.audio_duration_s`; free text deterministically truncated to 850 chars with a gentle notice; every `recent_turns` message truncated to ≤ 250 tokens).
     - Invariant after every commit: `len(recent_turns) <= 6` AND history ≤ 1,500 tokens. First ceiling hit → one Pydantic-validated slot extraction, deterministically truncated to ≤ 250 tokens, old turns dropped; `extraction_count <= 1`; second ceiling hit → force-close + "開新話題" prompt.
     - Routing priority: budget 100% → fixed rest message (0 LLM); button callbacks & photo batches → deterministic (0 LLM); free text → DeepSeek.
     - Lazy 15-min idle close; instant reset on topic switch.

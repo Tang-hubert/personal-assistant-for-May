@@ -1,7 +1,8 @@
-# System Architecture Specification (v1.3.1)
+# System Architecture Specification (v1.3.2)
 
 > v1.3 (2026-11-21): Applies Architect rulings on the `/architect` blind-spot review. Rationale lives in `docs/adr/0001`–`0005`; findings and rulings trace in `docs/reviews/2026-11-21-architect-blind-spots.md`.
 > v1.3.1 (2026-11-21): Resolves G1–G4 (prompt budget closure, per-turn truncation, `awaiting_intent` TTL). See ADR-0003.
+> v1.3.2 (2026-11-21): T3 rulings D1–D6. Multimodal budget 7,500 with media token estimates, `audio_duration_s`, photo events bypass the budget gate, tenant-level FinOps aggregate exception, 402/429 classification, DeepSeek thinking disabled. See ADR-0003 "Amendment (T3)".
 
 ## 1. High-Level Topology
 
@@ -53,6 +54,7 @@ To prevent feature lock-in to Telegram, `src/domain/models.py` enforces strict L
 - `payload_text: str | None`. The contract does not truncate it. The pipeline deterministically truncates any free text to **850 chars** before any LLM call and adds a gentle notice (ADR-0003).
 - `callback_data: str | None`. The button token of an `action_callback` event (required for that type).
 - `asset_ids: list[str]` — media is downloaded and persisted by the adapter through `StoragePort` before the event enters the pipeline. No filesystem `Path` crosses the domain boundary (ADR-0005).
+- `audio_duration_s: float | None` — required and > 0 for `"audio"` events. The adapter fills it from platform metadata (Telegram `voice.duration`, LINE audio `duration`), so voice over 120 s is rejected before any LLM call without decoding the file.
 
 ### Normalized `BotResponse` (Max Constraints Matched to the Stricter Channel)
 - `title: str` (Max 30 chars)
@@ -83,6 +85,10 @@ No third-party aggregators (no OpenRouter). Direct prepaid SDKs only (auto-recha
 | `TEXT_FAST_ROUTE` (Intent routing, slot extract, keywords) | `deepseek` (`DEEPSEEK_MODEL`) | `gemini` | Ultra-low cost fast text processing |
 
 - Handle `HTTP 402` (Prepaid balance exhausted) and `HTTP 429` cleanly: alert Discord Ops and reply to user gently.
+  - Classification: `402` → balance exhausted (Ops `critical`). Gemini `429` whose message mentions depleted prepayment credits is also balance exhausted (Google's behavior before it switched to 402). Any other `429` → rate limited (Ops `warning`). `5xx`, timeouts, and connection errors → provider error. The same (provider, reason) alert is throttled to once per 15 minutes.
+  - Fallback per the table applies only to text-only requests, and each fallback attempt passes the budget gate again. `MULTIMODAL_*` never falls back.
+- **DeepSeek thinking mode is disabled explicitly** on every call (`extra_body={"thinking": {"type": "disabled"}}`). DeepSeek enables thinking by default, which would add latency and billed output tokens to `TEXT_FAST_ROUTE`.
+- `src/adapters/llm/router_llm.py` (`RoutingLLM`) is the single `LLMPort` every caller uses. Per call it runs the budget gate, checks the prompt budget, picks the provider, and writes API-returned `usage` to `llm_usage_ledger` before parsing the reply. Gemini thinking tokens count as output tokens.
 - **Price table co-located with model IDs**: `src/config.py` holds per-model USD prices next to the model ID settings. A configured model ID with no price entry fails fast at startup.
 
 ## 4. 3-Layer Bounded Context & Session Control (Eliminating Infinite Compaction)
@@ -96,7 +102,9 @@ Every LLM call MUST stay within a fixed prompt budget regardless of how many mon
 | Call kind | Total | Slots |
 | :--- | :--- | :--- |
 | Text / follow-up | **≤ 4,500** tokens | system ≤ 500, state_json ≤ 250, retrieved_context ≤ 1,200, recent_turns ≤ 1,500, current_user_msg ≤ 1,050 |
-| Multimodal | **≤ 6,000** tokens | ≤ 6 images; voice ≤ 120 s (longer audio is rejected gently before any LLM call); free text ≤ 850 chars |
+| Multimodal | **≤ 7,500** tokens | ≤ 6 images; voice ≤ 120 s (longer audio is rejected gently before any LLM call); free text ≤ 850 chars |
+
+- Media is estimated before dispatch at **560 tokens per image** (Gemini `MEDIA_RESOLUTION_MEDIUM`, fixed by the adapter) and **32 tokens per audio second** (conservative; Gemini 3 bills 25). Worst Phase-1 case: 3 images + 120 s voice + system 500 + user message 1,050 = 7,070 ≤ 7,500. The ledger's real `usage` calibrates these numbers.
 
 - `retrieved_context` is one shared slot. A follow-up puts the truncated original text of `last_artifact_id` there; a memory query puts the Layer-3 top-3 records there. Never both.
 - Free text over 850 chars is deterministically truncated (850 × 1.2 = 1,020 ≤ 1,050) and the reply gently says so. This applies to every free-text input, captions included.
@@ -110,13 +118,14 @@ Every LLM call MUST stay within a fixed prompt budget regardless of how many mon
    - **Invariant after every commit**: `len(recent_turns) <= 6` (3 user + 3 assistant) AND history ≤ 1,500 estimated tokens.
    - **Per-turn cap**: every message written to `recent_turns` is deterministically truncated to ≤ 250 tokens (6 × 250 = 1,500). Full long outputs (copy, reports) live only in `knowledge_items` and reach the prompt through `state_json.last_artifact_id` → `retrieved_context`. They are never duplicated into `recent_turns`.
    - **Auto-Close Triggers**: (a) idle > 15 minutes — evaluated lazily when the next message arrives (no scheduler); (b) `TEXT_FAST_ROUTE` detects topic change; (c) user taps the finish button.
-   - **Single extraction, no recursive compaction**: when the ceiling is hit the first time, extract a fixed-schema slot dict via `TEXT_FAST_ROUTE`, validate it with a Pydantic schema, deterministically truncate it to ≤ 250 tokens (never send it back to the LLM to rewrite), store it in `state_json`, and hard-drop all older raw turns. `extraction_count <= 1`: hitting the ceiling a second time force-closes the session and invites May to start a new topic.
+   - **Single extraction, no recursive compaction**: when the ceiling is hit the first time, extract a fixed-schema slot dict via `TEXT_FAST_ROUTE`, validate it with a Pydantic schema, deterministically truncate it to ≤ 250 tokens (never send it back to the LLM to rewrite), store it in `state_json`, and hard-drop all older raw turns. `extraction_count <= 1` counts successful extractions; a call that got no response (providers down) is not counted and may be retried on the next message. Hitting the ceiling again after a successful extraction force-closes the session with the fixed new-topic reply (no handler call; the message still pays its routing classification, so a real topic shift escapes the force-close).
 3. **Layer 3 — Externalized Long-Term Memory (SQLite Retrieval)**:
    - Historical items live in `knowledge_items`, searched through `search_tokens` + FTS5 (ADR-0004).
    - Memory queries extract keywords via `TEXT_FAST_ROUTE` and inject **at most Top 3 matching records (≤ 1,200 tokens, the shared `retrieved_context` slot)**.
 
 ### 4.4 Routing Priority (deterministic first)
 1. FinOps at 100% → skip routing entirely, return the fixed rest message (0 LLM).
+   - Exception: photo events skip the budget gate and are still collected into a batch that gets its intent buttons. A per-photo rest message would break the single-response invariant (ADR-0002). The intent callback is gated instead.
 2. Button callbacks and photo batches → deterministic routing (0 LLM).
 3. Free text only → `TEXT_FAST_ROUTE` (DeepSeek) for intent / topic-shift detection.
 
@@ -142,7 +151,7 @@ Every LLM call MUST stay within a fixed prompt budget regardless of how many mon
 ## 5. Core Database Schema (SQLite WAL + FTS5 -> Postgres Portable)
 - Every table MUST contain `tenant_id TEXT NOT NULL` and `created_at`.
 - **All timestamp columns use the custom `UTCDateTime` TypeDecorator** (UTC-aware on write and read, on SQLite and Postgres alike — ADR-0005).
-- Every repository query requires explicit `tenant_id` and `user_id`. There are two documented exceptions. Identity resolution `(channel, external_user_id) -> (tenant_id, user_id)` is how both IDs are obtained. The startup orphan scan (`list_orphan_batches`, `status IN ('collecting','filtered')` across all tenants) is startup maintenance only and never serves a user request.
+- Every repository query requires explicit `tenant_id` and `user_id`. There are three documented exceptions. Identity resolution `(channel, external_user_id) -> (tenant_id, user_id)` is how both IDs are obtained. The startup orphan scan (`list_orphan_batches`, `status IN ('collecting','filtered')` across all tenants) is startup maintenance only and never serves a user request. Tenant-level FinOps aggregates (the Taipei-day ledger cost sum, the tenant's daily budget, and the `budget_alert_80_date` claim) are scoped by `tenant_id` only, because the budget belongs to the tenant, not to one person. They never return person-level rows.
 
 1. `tenants`: `id`, `name`, `plan_tier`, `daily_budget_usd` (default `0.20`), `budget_alert_80_date` (Asia/Taipei date of the last 80% alert; persisted so restarts never resend), `config_json`
 2. `users` (a person): `id`, `tenant_id`, `display_name`, `preferences_json`
@@ -155,8 +164,8 @@ Every LLM call MUST stay within a fixed prompt budget regardless of how many mon
 8. `llm_usage_ledger`: `id`, `tenant_id`, `user_id`, `provider`, `model`, `prompt_tokens`, `completion_tokens`, `estimated_cost_usd`, `workflow_name`
 
 ## 6. FinOps Guardian & Dual-Track Taiwan Direct-Sales Compliance
-- **FinOps**: Before EVERY LLM call, sum the tenant's ledger for the current Asia/Taipei day. The day boundary is computed in Python with `ZoneInfo("Asia/Taipei")` and converted to a UTC range for the query — never from process local time (ADR-0005). `>= 80%`: warn Discord Ops once per day (guarded by `tenants.budget_alert_80_date`). `>= 100%`: block LLM, return friendly rest message, alert Discord Ops.
-- **Test isolation**: `tests/conftest.py` autouse fixture forces `APP_ENV=test` + `TEST_NO_SEND=1` and blocks unmocked outbound network at the httpx-transport / socket layer, so the guard holds even when `pytest` runs without `scripts/test.py`.
+- **FinOps**: Before EVERY LLM call, sum the tenant's ledger for the current Asia/Taipei day. The day boundary is computed in Python with `ZoneInfo("Asia/Taipei")` and converted to a UTC range for the query — never from process local time (ADR-0005). `>= 80%`: warn Discord Ops once per day (guarded by `tenants.budget_alert_80_date`, claimed by a conditional UPDATE before sending, so restarts and races never resend). `>= 100%`: block LLM, return friendly rest message, alert Discord Ops (deduplicated in memory per tenant and Taipei day; a restart may resend it once). The check runs before the call, so concurrent users of one tenant can overshoot by at most one call each (single-process, family scale).
+- **Test isolation**: `tests/conftest.py` autouse fixture forces `APP_ENV=test` + `TEST_NO_SEND=1` and blocks unmocked outbound network at the httpx and httpx2 transports (google-genai and openai ship on httpx2), `socket.connect`, and `asyncio` `create_connection` (the Windows proactor loop bypasses `socket.connect`), so the guard holds even when `pytest` runs without `scripts/test.py`.
 - **Compliance (`src/domain/compliance.py`)**: Deterministic scanner using `data/tw_prohibited_terms.yaml`. Always generate Version A (safe persuasive experience framing, 0 prohibited terms verified post-LLM) + optional Version B (polished original intent with explicit legal risk `warning_note`).
 
 ## 7. External Services Matrix (Strict Phase Boundaries)
