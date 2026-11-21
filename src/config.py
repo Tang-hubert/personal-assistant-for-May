@@ -7,6 +7,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal, Self
+from urllib.parse import urlsplit
 
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -22,6 +23,10 @@ class PriceTier:
 def _tier(effective_from: date, input_per_1m: str, output_per_1m: str) -> PriceTier:
     return PriceTier(effective_from, Decimal(input_per_1m), Decimal(output_per_1m))
 
+
+# Fixed provider endpoint, deliberately not an env var: a typo there would silently
+# send keys elsewhere.
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 # USD per 1M tokens. Tiers are ordered by effective_from; the Taipei date picks the tier.
 MODEL_PRICES: dict[str, tuple[PriceTier, ...]] = {
@@ -44,7 +49,10 @@ def price_for(model: str, on: date) -> PriceTier:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # hide_input_in_errors: a startup error must not print the keys or the webhook URL.
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True
+    )
 
     APP_ENV: Literal["dev", "prod", "test"] = "dev"
     GEMINI_API_KEY: SecretStr
@@ -64,6 +72,20 @@ class Settings(BaseSettings):
     def _split_ids(cls, value: object) -> object:
         if isinstance(value, str):
             return tuple(int(part) for part in value.split(",") if part.strip())
+        return value
+
+    @field_validator("DISCORD_OPS_WEBHOOK_URL", mode="before")
+    @classmethod
+    def _strip_webhook(cls, value: object) -> object:
+        # A .env saved on Windows leaves a trailing CR, which httpx rejects at send time.
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("DISCORD_OPS_WEBHOOK_URL")
+    @classmethod
+    def _webhook_must_be_https(cls, value: SecretStr) -> SecretStr:
+        url = urlsplit(value.get_secret_value())
+        if url.scheme != "https" or not url.hostname:
+            raise ValueError("DISCORD_OPS_WEBHOOK_URL must be an https URL with a host")
         return value
 
     @model_validator(mode="after")

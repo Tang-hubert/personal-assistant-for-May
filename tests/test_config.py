@@ -73,3 +73,15 @@ def test_photo_gate_defaults() -> None:
     settings = _settings()
     assert settings.BLUR_THRESHOLD == 100.0
     assert settings.BATCH_DEBOUNCE_SECONDS == 5.0
+
+
+def test_webhook_url_whitespace_is_stripped_at_load() -> None:
+    settings = _settings(DISCORD_OPS_WEBHOOK_URL="https://discord.invalid/webhook\r\n")
+    assert settings.DISCORD_OPS_WEBHOOK_URL.get_secret_value() == "https://discord.invalid/webhook"
+
+
+@pytest.mark.parametrize("url", ["http://discord.invalid/webhook", "not a url", "https:///path"])
+def test_webhook_url_must_be_https_with_a_host(url: str) -> None:
+    with pytest.raises(ValidationError, match="DISCORD_OPS_WEBHOOK_URL") as caught:
+        _settings(DISCORD_OPS_WEBHOOK_URL=url)
+    assert url not in str(caught.value)
