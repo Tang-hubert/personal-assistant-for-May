@@ -16,11 +16,14 @@ import httpx2
 import pytest
 
 from src.adapters.storage.engine import create_engine
+from src.adapters.storage.ledger_repository import SqlLedger
 from src.adapters.storage.media_repository import SqlMediaStore
 from src.adapters.storage.migrate import upgrade_to_head
 from src.adapters.storage.repository import SqlStorage
+from src.adapters.storage.session_repository import SqlSessionStore
 from src.config import Settings
 from tests.fakes import FrozenClock, Owner
+from tests.workflow_helpers import WorkflowRig
 
 _real_connect = socket.socket.connect
 _real_connect_ex = socket.socket.connect_ex
@@ -194,3 +197,24 @@ async def owner(storage: SqlStorage) -> Owner:
 async def other_owner(storage: SqlStorage) -> Owner:
     tenant_id = await storage.create_tenant(name="Other")
     return Owner(tenant_id, await storage.create_user(tenant_id=tenant_id, display_name="Other"))
+
+
+@pytest.fixture
+async def wf(
+    storage: SqlStorage,
+    media_store: SqlMediaStore,
+    db_path: Path,
+    clock: FrozenClock,
+    owner: Owner,
+) -> AsyncIterator[WorkflowRig]:
+    engine = create_engine(db_path)
+    yield WorkflowRig(
+        storage,
+        media_store,
+        SqlSessionStore(engine, clock),
+        SqlLedger(engine, clock),
+        clock,
+        owner,
+        db_path,
+    )
+    await engine.dispose()
