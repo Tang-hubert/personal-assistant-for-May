@@ -49,6 +49,7 @@ class IncomingEvent(_Contract):
     media_group_id: str | None = None
     group_index: int | None = None
     group_total: int | None = None
+    audio_duration_s: float | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def _check_shape(self) -> Self:
@@ -62,6 +63,8 @@ class IncomingEvent(_Contract):
             raise ValueError("group_index must be within 1..group_total")
         if self.event_type in ("image", "audio") and not self.asset_ids:
             raise ValueError(f"{self.event_type} events must carry asset_ids")
+        if self.event_type == "audio" and self.audio_duration_s is None:
+            raise ValueError("audio events must carry audio_duration_s from platform metadata")
         if self.event_type == "action_callback" and not self.callback_data:
             raise ValueError("action_callback events must carry callback_data")
         return self

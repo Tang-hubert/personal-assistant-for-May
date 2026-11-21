@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
-from typing import Literal, Protocol
+from datetime import date, datetime
+from decimal import Decimal
+from enum import StrEnum
+from typing import Any, Literal, Protocol, Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from src.domain.budget import (
+    MAX_AUDIO_S,
+    MAX_IMAGES,
+    MULTIMODAL_TOTAL,
+    PromptParts,
+    multimodal_estimate,
+)
 from src.domain.media import AssetVerdict, BatchStatus, MediaBatchView, MediaType
 from src.domain.models import (
     BotResponse,
@@ -19,6 +28,10 @@ from src.domain.models import (
     ResolvedIdentity,
     TaskCapability,
 )
+from src.domain.session import TopicSessionState, TopicType
+
+Provider = Literal["gemini", "deepseek"]
+UnavailableReason = Literal["balance_exhausted", "rate_limited", "provider_error"]
 
 
 class Clock(Protocol):
@@ -34,27 +47,97 @@ class ChannelPort(Protocol):
 
 
 class LLMRequest(BaseModel):
+    """One provider call. A request whose prompt, images, or audio would break the
+    ARCHITECTURE §4.2 budget cannot be constructed, so it can never be sent.
+
+    When audio_duration_s is set, exactly one of asset_ids is the voice clip; the rest are images.
+    """
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    tenant_id: str
+    user_id: str
+    workflow_name: str = Field(max_length=32)
     capability: TaskCapability
-    system: str
-    user_text: str
+    prompt: PromptParts
     asset_ids: tuple[str, ...] = ()
-    max_output_tokens: int
+    audio_duration_s: float | None = Field(default=None, gt=0, le=MAX_AUDIO_S)
+    max_output_tokens: int = Field(gt=0)
+    json_output: bool = False
+
+    @property
+    def image_count(self) -> int:
+        return len(self.asset_ids) - (1 if self.audio_duration_s is not None else 0)
+
+    @model_validator(mode="after")
+    def _check_media_budget(self) -> Self:
+        if self.audio_duration_s is not None and not self.asset_ids:
+            raise ValueError("an audio request must carry the voice asset in asset_ids")
+        if self.image_count > MAX_IMAGES:
+            raise ValueError(f"{self.image_count} images, over the {MAX_IMAGES} limit")
+        if self.asset_ids:
+            estimate = multimodal_estimate(self.prompt, self.image_count, self.audio_duration_s)
+            if estimate > MULTIMODAL_TOTAL:
+                raise ValueError(f"multimodal prompt is {estimate} tokens, over {MULTIMODAL_TOTAL}")
+        return self
 
 
 class LLMResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     text: str
-    provider: Literal["gemini", "deepseek"]
+    provider: Provider
     model: str
     prompt_tokens: int
     completion_tokens: int
 
 
 class LLMPort(Protocol):
-    async def generate(self, request: LLMRequest) -> LLMResult: ...
+    async def generate(self, request: LLMRequest) -> LLMResult:
+        """Raises BudgetExhausted or LLMUnavailable; never a provider SDK error."""
+        ...
+
+
+class BudgetExhausted(Exception):
+    """The tenant reached 100% of its Taipei-day budget; no LLM call was made."""
+
+
+class LLMUnavailable(Exception):
+    """A provider refused or failed the call (HTTP 402/429/5xx, transport, or a malformed
+    reply). `billed` is the usage of a reply the provider charged for but that was unusable."""
+
+    def __init__(
+        self, reason: UnavailableReason, provider: Provider, billed: LLMResult | None = None
+    ) -> None:
+        super().__init__(f"{provider}: {reason}")
+        self.reason: UnavailableReason = reason
+        self.provider: Provider = provider
+        self.billed = billed
+
+
+class BudgetStatus(StrEnum):
+    OK = "ok"
+    WARN = "warn"
+    EXHAUSTED = "exhausted"
+
+
+class BudgetGuardPort(Protocol):
+    """FinOps Guardian as the router and RoutingLLM see it."""
+
+    async def status(self, tenant_id: str) -> BudgetStatus: ...
+
+    async def ensure_can_spend(self, tenant_id: str) -> None:
+        """Raises BudgetExhausted at 100% of the tenant's Taipei-day budget."""
+        ...
+
+    async def record(self, request: LLMRequest, result: LLMResult) -> None: ...
+
+
+class AssetBlob(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    data: bytes
+    mime_type: str
 
 
 class StoragePort(Protocol):
@@ -98,6 +181,12 @@ class MediaStorePort(Protocol):
     ) -> str: ...
 
     async def read_asset(self, *, tenant_id: str, user_id: str, asset_id: str) -> bytes | None: ...
+
+    async def read_asset_blob(
+        self, *, tenant_id: str, user_id: str, asset_id: str
+    ) -> AssetBlob | None:
+        """The bytes plus the MIME type implied by the stored file's extension."""
+        ...
 
     async def open_batch(
         self,
@@ -152,3 +241,53 @@ class OpsNotifierPort(Protocol):
     async def notify(
         self, level: Literal["warning", "critical", "error"], message: str
     ) -> None: ...
+
+
+class LedgerPort(Protocol):
+    """llm_usage_ledger plus the tenant budget columns. spent_between, daily_budget, and
+    claim_alert_80 are tenant-level aggregates: the third documented exception to
+    user_id scoping (ARCHITECTURE §5)."""
+
+    async def record_usage(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        provider: Provider,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cost_usd: Decimal,
+        workflow_name: str,
+    ) -> None: ...
+
+    async def spent_between(self, tenant_id: str, start: datetime, end: datetime) -> Decimal:
+        """Sum of estimated_cost_usd over the half-open UTC range [start, end)."""
+        ...
+
+    async def daily_budget(self, tenant_id: str) -> Decimal: ...
+
+    async def claim_alert_80(self, tenant_id: str, day: date) -> bool:
+        """True only for the one caller that marked `day` as alerted."""
+        ...
+
+
+class SessionStorePort(Protocol):
+    async def get_active(self, *, tenant_id: str, user_id: str) -> TopicSessionState | None: ...
+
+    async def open_fresh(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        topic_type: TopicType,
+        state_json: dict[str, Any] | None = None,
+    ) -> TopicSessionState:
+        """Close any active session and open an empty one; the result is the active session."""
+        ...
+
+    async def save(self, *, tenant_id: str, user_id: str, state: TopicSessionState) -> bool:
+        """Persist a still-active session. False when it was closed meanwhile."""
+        ...
+
+    async def close(self, *, tenant_id: str, user_id: str, session_id: str) -> None: ...

@@ -95,10 +95,21 @@ def test_group_index_and_total_come_together_and_are_ordered() -> None:
         _event(event_type="image", asset_ids=("a1",), group_index=0, group_total=3)
 
 
-@pytest.mark.parametrize("event_type", ["image", "audio"])
-def test_media_events_require_assets(event_type: str) -> None:
+@pytest.mark.parametrize(
+    ("event_type", "extra"), [("image", {}), ("audio", {"audio_duration_s": 3.0})]
+)
+def test_media_events_require_assets(event_type: str, extra: dict[str, Any]) -> None:
+    _event(event_type=event_type, asset_ids=("a1",), **extra)
     with pytest.raises(ValidationError):
-        _event(event_type=event_type, asset_ids=())
+        _event(event_type=event_type, asset_ids=(), **extra)
+
+
+def test_audio_events_require_a_positive_duration() -> None:
+    _event(event_type="audio", asset_ids=("a1",), audio_duration_s=121.0)
+    with pytest.raises(ValidationError):
+        _event(event_type="audio", asset_ids=("a1",))
+    with pytest.raises(ValidationError):
+        _event(event_type="audio", asset_ids=("a1",), audio_duration_s=0)
 
 
 def test_callback_events_require_callback_data() -> None:
