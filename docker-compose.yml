@@ -4,6 +4,8 @@ services:
     image: personal-assistant-for-may:local
     init: true
     restart: unless-stopped
+    # In-flight LLM calls and a 5 s photo debounce must finish before SIGKILL.
+    stop_grace_period: 30s
     env_file:
       - path: .env
         required: false
