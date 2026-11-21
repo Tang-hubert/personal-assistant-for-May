@@ -1,0 +1,56 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python scripts/test.py:*)",
+      "Bash(uv run python scripts/test.py:*)",
+      "Bash(uv run ruff:*)",
+      "Bash(uv run mypy:*)",
+      "Bash(uv sync:*)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.local)",
+      "Read(./.env.dev)",
+      "Read(./.env.prod)",
+      "Read(./.env.production)",
+      "Read(./.env.staging)",
+      "Read(./secrets/**)",
+      "Read(~/.ssh/**)",
+      "Read(~/.config/**)",
+      "Edit(./.env)",
+      "Edit(./.env.local)",
+      "Edit(./.env.dev)",
+      "Edit(./.env.prod)",
+      "Edit(./.env.production)",
+      "Edit(./.env.staging)",
+      "Bash(rm -rf:*)",
+      "Bash(Remove-Item:*)",
+      "PowerShell(Remove-Item:*)",
+      "PowerShell(del:*)",
+      "PowerShell(rm:*)",
+      "Bash(del /s /q:*)",
+      "Bash(git push --force:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(curl *api.telegram.org*)",
+      "Bash(curl *api.line.me*)",
+      "PowerShell(*api.telegram.org*)",
+      "PowerShell(*api.line.me*)"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python scripts/test.py"
+          }
+        ]
+      }
+    ]
+  }
+}

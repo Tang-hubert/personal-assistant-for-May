@@ -1,0 +1,21 @@
+services:
+  app:
+    build: .
+    image: personal-assistant-for-may:local
+    init: true
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: Asia/Taipei
+      DATA_DIR: /app/data
+    # Linux prod only. On Windows run natively with `uv run`: SQLite WAL is unreliable over
+    # Docker Desktop file sharing. Tests never touch /app/data; they use container-local tmp dirs.
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
