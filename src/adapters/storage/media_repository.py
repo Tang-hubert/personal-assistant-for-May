@@ -21,9 +21,25 @@ from src.domain.media import (
     MediaType,
 )
 from src.domain.models import Channel
-from src.domain.ports import Clock
+from src.domain.ports import AssetBlob, Clock
 
 MEDIA_DIR = "media"
+
+# An explicit table: the stdlib mimetypes module reads the Windows registry, so its answers
+# differ between the dev machine and the Linux server.
+MIME_BY_EXT: dict[str, str] = {
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "webp": "image/webp",
+    "heic": "image/heic",
+    "heif": "image/heif",
+    "ogg": "audio/ogg",
+    "oga": "audio/ogg",
+    "mp3": "audio/mp3",
+    "m4a": "audio/mp4",
+    "wav": "audio/wav",
+}
 
 
 def _view(row: MediaBatch) -> MediaBatchView:
@@ -86,6 +102,20 @@ class SqlMediaStore:
 
     async def read_asset(self, *, tenant_id: str, user_id: str, asset_id: str) -> bytes | None:
         """None when the asset is not this owner's, or its file is gone from disk."""
+        loaded = await self._load(tenant_id, user_id, asset_id)
+        return None if loaded is None else loaded[1]
+
+    async def read_asset_blob(
+        self, *, tenant_id: str, user_id: str, asset_id: str
+    ) -> AssetBlob | None:
+        loaded = await self._load(tenant_id, user_id, asset_id)
+        if loaded is None:
+            return None
+        local_path, data = loaded
+        suffix = PurePosixPath(local_path).suffix.lstrip(".").lower()
+        return AssetBlob(data=data, mime_type=MIME_BY_EXT[suffix])
+
+    async def _load(self, tenant_id: str, user_id: str, asset_id: str) -> tuple[str, bytes] | None:
         async with self._sessions() as session:
             local_path = (
                 await session.execute(
@@ -100,7 +130,7 @@ class SqlMediaStore:
             return None
         path = self._data_dir.joinpath(*PurePosixPath(local_path).parts)
         try:
-            return await asyncio.to_thread(path.read_bytes)
+            return local_path, await asyncio.to_thread(path.read_bytes)
         except FileNotFoundError:
             return None
 

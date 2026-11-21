@@ -168,3 +168,36 @@ async def test_orphan_listing_covers_only_collecting_and_filtered_across_tenants
         )
     orphans = await media_store.list_orphan_batches()
     assert {b.id for b in orphans} == {collecting, filtered}
+
+
+@pytest.mark.parametrize(
+    ("media_type", "ext", "mime"),
+    [("image", "jpg", "image/jpeg"), ("image", "PNG", "image/png"), ("audio", "ogg", "audio/ogg")],
+)
+async def test_asset_blob_carries_the_mime_type_of_its_extension(
+    media_store: SqlMediaStore, owner: Owner, media_type: str, ext: str, mime: str
+) -> None:
+    asset_id = await media_store.save_asset(
+        tenant_id=owner.tenant_id,
+        user_id=owner.user_id,
+        data=b"bytes",
+        media_type=media_type,  # type: ignore[arg-type]
+        ext=ext,
+    )
+    blob = await media_store.read_asset_blob(
+        tenant_id=owner.tenant_id, user_id=owner.user_id, asset_id=asset_id
+    )
+    assert blob is not None
+    assert (blob.data, blob.mime_type) == (b"bytes", mime)
+
+
+async def test_asset_blob_is_owner_scoped(
+    media_store: SqlMediaStore, owner: Owner, other_owner: Owner
+) -> None:
+    asset_id = await _asset(media_store, owner)
+    assert (
+        await media_store.read_asset_blob(
+            tenant_id=other_owner.tenant_id, user_id=other_owner.user_id, asset_id=asset_id
+        )
+        is None
+    )
