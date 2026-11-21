@@ -10,6 +10,9 @@ dependencies = [
     "aiosqlite>=0.20",
     "alembic>=1.14",
     "tzdata>=2024.2",
+    "opencv-python-headless>=5.1.0.95",
+    "imagehash>=4.3.2",
+    "pillow-heif>=1.8.1",
 ]
 
 [dependency-groups]

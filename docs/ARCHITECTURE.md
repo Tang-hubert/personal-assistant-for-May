@@ -142,14 +142,14 @@ Every LLM call MUST stay within a fixed prompt budget regardless of how many mon
 ## 5. Core Database Schema (SQLite WAL + FTS5 -> Postgres Portable)
 - Every table MUST contain `tenant_id TEXT NOT NULL` and `created_at`.
 - **All timestamp columns use the custom `UTCDateTime` TypeDecorator** (UTC-aware on write and read, on SQLite and Postgres alike — ADR-0005).
-- Every repository query requires explicit `tenant_id` and `user_id`. The single documented exception is identity resolution `(channel, external_user_id) -> (tenant_id, user_id)`, which is how both IDs are obtained.
+- Every repository query requires explicit `tenant_id` and `user_id`. There are two documented exceptions. Identity resolution `(channel, external_user_id) -> (tenant_id, user_id)` is how both IDs are obtained. The startup orphan scan (`list_orphan_batches`, `status IN ('collecting','filtered')` across all tenants) is startup maintenance only and never serves a user request.
 
 1. `tenants`: `id`, `name`, `plan_tier`, `daily_budget_usd` (default `0.20`), `budget_alert_80_date` (Asia/Taipei date of the last 80% alert; persisted so restarts never resend), `config_json`
 2. `users` (a person): `id`, `tenant_id`, `display_name`, `preferences_json`
 3. `channel_identities`: `id`, `tenant_id`, `user_id`, `channel` (`telegram|line`), `external_user_id`, `UNIQUE(channel, external_user_id)` (ADR-0001)
 4. `topic_sessions`: `id`, `tenant_id`, `user_id`, `topic_type` (`lecture|sales|memory|ios_help|general`), `status` (`active|closed`), `turn_count`, `extraction_count`, `state_json`, `recent_turns_json`, `last_active_at` + partial unique index (§4.5)
-5. `media_batches`: `id`, `tenant_id`, `user_id`, `channel`, `media_group_id`, `status` (`collecting|filtered|awaiting_intent|done`), `raw_count`, `kept_count`
-6. `media_assets`: `id`, `batch_id`, `tenant_id`, `external_file_id` (cache only), `media_type`, `local_path` (POSIX string relative to `DATA_DIR`), `phash`, `blur_score`, `is_kept`, `is_blurry`
+5. `media_batches`: `id`, `tenant_id`, `user_id`, `channel`, `media_group_id`, `status` (`collecting|filtered|awaiting_intent|done`), `raw_count`, `kept_count`, `reply_address` (persistent chat address for orphan recovery; never an ephemeral token), `intent_expires_at`
+6. `media_assets`: `id`, `batch_id` (nullable: the adapter saves the file before any batch exists, and voice never joins one), `tenant_id`, `user_id`, `external_file_id` (cache only), `media_type`, `local_path` (POSIX string relative to `DATA_DIR`), `phash`, `blur_score`, `is_kept`, `is_blurry`
    - **Invariant**: every asset keeps its original file locally. `external_file_id` is never the only copy (Phase 2 LINE needs our own bytes).
 7. `knowledge_items`: `id`, `tenant_id`, `user_id`, `category` (`jewelry|product|lecture|item_location|crm`), `title`, `content_text`, `structured_json`, `primary_asset_id`, `search_tokens` (+ FTS5 virtual table over `search_tokens`, ADR-0004)
 8. `llm_usage_ledger`: `id`, `tenant_id`, `user_id`, `provider`, `model`, `prompt_tokens`, `completion_tokens`, `estimated_cost_usd`, `workflow_name`
@@ -172,7 +172,7 @@ Every LLM call MUST stay within a fixed prompt budget regardless of how many mon
 ## 9. Cross-Platform & Deployment Rules
 - **Separate bots**: dev and prod MUST use different `TELEGRAM_BOT_TOKEN`s. Two long-polling processes on one token cause `409 Conflict` and dropped messages.
 - **Python pinned**: `.python-version` = `3.12`; Docker base image uses the same minor.
-- **Dependencies**: `opencv-python-headless` (no libGL in slim images), `pillow-heif` (iPhone HEIC), `tzdata` (IANA zones on Windows and slim images).
+- **Dependencies**: `opencv-python-headless` (no libGL in slim images), `imagehash` (pHash dedup), `pillow-heif` (iPhone HEIC), `tzdata` (IANA zones on Windows and slim images).
 - **Time & paths** (ADR-0005): UTC-aware storage via `UTCDateTime`; injected `Clock`; DB stores media paths as POSIX strings relative to `DATA_DIR`.
 - **Container verification**: `docker compose run --rm app python scripts/test.py` is part of T1 and T5 DoD. It uses a container-local / named volume, never the Windows bind mount (SQLite WAL is unreliable over Docker Desktop file sharing).
 - **Volumes**: `./data:/app/data` bind mount is for Linux prod only. On Windows, run the app natively with `uv run`; never open one SQLite file from a native process and a container at the same time.

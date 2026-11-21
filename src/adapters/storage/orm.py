@@ -143,6 +143,7 @@ class MediaBatch(Base):
     status: Mapped[str] = mapped_column(String(16))
     raw_count: Mapped[int] = mapped_column(default=0)
     kept_count: Mapped[int] = mapped_column(default=0)
+    reply_address: Mapped[str | None] = mapped_column(Text)
     intent_expires_at: Mapped[datetime | None]
     created_at: Mapped[datetime]
 
@@ -153,11 +154,13 @@ class MediaAsset(Base):
         ForeignKeyConstraint(
             ["tenant_id", "batch_id"], ["media_batches.tenant_id", "media_batches.id"]
         ),
+        _owner_fk(),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
-    batch_id: Mapped[str] = mapped_column(String(32), index=True)
+    batch_id: Mapped[str | None] = mapped_column(String(32), index=True)
     tenant_id: Mapped[str] = mapped_column(String(32))
+    user_id: Mapped[str] = mapped_column(String(32))
     external_file_id: Mapped[str | None] = mapped_column(Text)
     media_type: Mapped[str] = mapped_column(String(16))
     local_path: Mapped[str] = mapped_column(Text)

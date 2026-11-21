@@ -33,7 +33,7 @@
   - **Single-response invariant (ADR-0002)**: one event/batch → at most one `BotResponse`. Progress = chat actions only; never send "處理中..." text. Adapters own reply-vs-push via `ReplyTarget`.
 - **Dual Direct LLM Providers (No OpenRouter)**: `gemini` (`google-genai`) for multimodal/audio/TW copywriting; `deepseek` (`openai` SDK) for fast text routing & keyword extraction. Model IDs come from `.env`; their prices live next to them in `src/config.py`, and an unknown model fails fast.
 - **Zero-Token Pre-Processing**: Pass all raw photo bursts through `batch_aggregator` + `image_gate` (blur + pHash dedup) before any LLM call.
-- **Multi-Tenant Isolation**: Every DB table and repository query MUST require explicit `tenant_id` and `user_id`. A `users` row is a person; channel accounts live in `channel_identities` (ADR-0001). Identity resolution `(channel, external_user_id)` is the only lookup without them.
+- **Multi-Tenant Isolation**: Every DB table and repository query MUST require explicit `tenant_id` and `user_id`. A `users` row is a person; channel accounts live in `channel_identities` (ADR-0001). Identity resolution `(channel, external_user_id)` and the startup-only orphan batch scan (`list_orphan_batches`) are the only lookups without them.
 - **Dual-Track Sales Compliance**: Never refuse direct-sales copy; output Version A (compliant persuasive) + optional Version B (original intent + explicit Taiwan legal warning).
 
 ## Progressive Docs (Read On Demand)
