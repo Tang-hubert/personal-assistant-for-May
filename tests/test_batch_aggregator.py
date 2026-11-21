@@ -48,7 +48,7 @@ async def test_fifteen_photo_burst_becomes_one_batch_and_one_response(rig: Rig) 
     assert len(rig.channel.sent) == 1
     target, response = rig.channel.sent[0]
     assert target.address == "chat-1"
-    assert len(response.actions) == 3
+    assert len(response.actions) == 4
     batch_id = batch_id_of(response)
     assert all(batch_id in a.callback_data for a in response.actions)
 
@@ -207,3 +207,28 @@ async def test_failed_send_leaves_the_batch_recoverable(rig: Rig) -> None:
     assert await rig.aggregator().recover_orphans() == 1
     assert len(rig.channel.sent) == 1
     assert (await _batch(rig, batch_id)).status is BatchStatus.AWAITING_INTENT
+
+
+async def test_drain_during_the_debounce_window_still_sends_the_one_intent_prompt(
+    rig: Rig,
+) -> None:
+    aggregator = rig.aggregator(debounce_s=0.3)
+    asset = await rig.save(imagegen.jpeg(imagegen.sharp(900)))
+    await aggregator.add(rig.image_event(asset))
+    assert rig.channel.sent == []
+
+    started = time.monotonic()
+    await aggregator.drain()
+
+    assert time.monotonic() - started >= 0.2, "drain waited for the pending timer"
+    (_, response) = rig.channel.sent[0]
+    assert len(rig.channel.sent) == 1 and len(response.actions) == 4
+    batch = await _batch(rig, batch_id_of(response))
+    assert batch.status is BatchStatus.AWAITING_INTENT
+
+
+async def test_drain_with_nothing_pending_returns_at_once(rig: Rig) -> None:
+    started = time.monotonic()
+    await rig.aggregator(debounce_s=5.0).drain()
+    assert time.monotonic() - started < 0.1
+    assert rig.channel.sent == []

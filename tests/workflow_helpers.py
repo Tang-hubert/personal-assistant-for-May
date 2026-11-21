@@ -2,6 +2,7 @@ import json
 import sqlite3
 from collections.abc import Callable
 from contextlib import closing
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +17,11 @@ from src.domain.router import HandlerReply, Router, TurnContext
 from src.domain.session import TopicSessionState
 from src.pipeline.batch_aggregator import BatchAggregator
 from src.pipeline.finops_guardian import FinOpsGuardian
+from src.workflows.audio_handler import VoiceTranscriber
 from src.workflows.dispatch import IntentDispatcher
+from src.workflows.ios_helper import IosHelper
 from src.workflows.lecture_digest import LectureDigest
+from src.workflows.memory_stash import MemoryStash
 from src.workflows.sales_copy import SalesCopy
 from tests import imagegen
 from tests.batch_helpers import BLUR_THRESHOLD, DEBOUNCE, batch_id_of
@@ -64,6 +68,7 @@ class WorkflowRig:
         self.storage = storage
         self.media = media
         self.sessions = sessions
+        self.ledger = ledger
         self.clock = clock
         self.owner = owner
         self.channel = FakeChannel()
@@ -84,6 +89,8 @@ class WorkflowRig:
         }
         self.lecture = LectureDigest(**deps)
         self.sales = SalesCopy(**deps)
+        self.memory = MemoryStash(**deps)
+        self.ios = IosHelper(**deps)
         self.router = Router(
             finops=FinOpsGuardian(ledger, FakeNotifier(), clock),
             llm=self.llm,
@@ -93,9 +100,13 @@ class WorkflowRig:
                 "general": _general,
                 "lecture": self.lecture.follow_up,
                 "sales": self.sales.follow_up,
+                "memory": self.memory.handle,
+                "ios_help": self.ios.handle,
             },
-            audio_handler=_no_audio,
-            intent_handler=IntentDispatcher(lecture=self.lecture, sales=self.sales),
+            transcriber=VoiceTranscriber(self.llm),
+            intent_handler=IntentDispatcher(
+                lecture=self.lecture, sales=self.sales, memory=self.memory, ios=self.ios
+            ),
             clock=clock,
         )
         self._n = 0
@@ -148,6 +159,31 @@ class WorkflowRig:
     async def say(self, text: str) -> BotResponse | None:
         return await self.router.handle(self._event(event_type="text", payload_text=text))
 
+    async def spend_whole_budget(self) -> None:
+        await self.ledger.record_usage(
+            tenant_id=self.owner.tenant_id,
+            user_id=self.owner.user_id,
+            provider="deepseek",
+            model="deepseek-flash",
+            prompt_tokens=0,
+            completion_tokens=0,
+            cost_usd=Decimal("0.20"),
+            workflow_name="test",
+        )
+
+    async def speak(self, duration_s: float = 8.0) -> BotResponse | None:
+        """A voice message; replies["voice_transcribe"] decides what the clip says."""
+        asset = await self.media.save_asset(
+            tenant_id=self.owner.tenant_id,
+            user_id=self.owner.user_id,
+            data=b"OggS-voice",
+            media_type="audio",
+            ext="ogg",
+        )
+        return await self.router.handle(
+            self._event(event_type="audio", asset_ids=(asset,), audio_duration_s=duration_s)
+        )
+
     async def batch_status(self, batch_id: str) -> BatchStatus:
         batch = await self.media.get_batch(
             tenant_id=self.owner.tenant_id, user_id=self.owner.user_id, batch_id=batch_id
@@ -173,7 +209,3 @@ GENERAL = BotResponse(title="general")
 
 async def _general(ctx: TurnContext) -> HandlerReply:
     return HandlerReply(text="general", response=GENERAL)
-
-
-async def _no_audio(event: IncomingEvent) -> BotResponse:
-    raise AssertionError("audio is not part of T4")

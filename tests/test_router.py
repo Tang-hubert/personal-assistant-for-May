@@ -65,12 +65,13 @@ class FakeHandler:
 
 
 @dataclass
-class FakeAudio:
+class FakeTranscriber:
+    transcript: str = "翡翠放哪"
     events: list[IncomingEvent] = field(default_factory=list)
 
-    async def __call__(self, event: IncomingEvent) -> BotResponse:
+    async def __call__(self, event: IncomingEvent) -> str:
         self.events.append(event)
-        return BotResponse(title="audio")
+        return self.transcript
 
 
 @dataclass
@@ -98,7 +99,7 @@ class Rig:
         self.batches = FakeBatches()
         self.general = FakeHandler("general")
         self.sales = FakeHandler("sales")
-        self.audio = FakeAudio()
+        self.transcriber = FakeTranscriber()
         self.intent = FakeIntent()
         self.use_llm(self.llm)
         self._n = 0
@@ -110,7 +111,7 @@ class Rig:
             sessions=self.sessions,
             batches=self.batches,
             handlers={"general": self.general, "sales": self.sales},
-            audio_handler=self.audio,
+            transcriber=self.transcriber,
             intent_handler=self.intent,
             clock=self.clock,
         )
@@ -191,7 +192,7 @@ async def test_dod_b_exhausted_budget_answers_rest_with_zero_llm_calls(rig: Rig)
         assert await rig.router.handle(event) == replies.rest_message()
 
     assert rig.llm.calls == []
-    assert rig.general.contexts == rig.audio.events == rig.batches.callbacks == []
+    assert rig.general.contexts == rig.transcriber.events == rig.batches.callbacks == []
     assert rig.notifier.levels() == ["critical"]
 
 
@@ -237,13 +238,16 @@ async def test_dod_j_121_second_voice_is_rejected_before_any_llm_call(rig: Rig) 
 
     assert reply == replies.voice_too_long()
     assert rig.llm.calls == []
-    assert rig.audio.events == []
+    assert rig.transcriber.events == []
 
 
-async def test_120_second_voice_goes_to_the_audio_handler(rig: Rig) -> None:
+async def test_120_second_voice_is_transcribed_and_routed_like_text(rig: Rig) -> None:
     voice = rig.event("audio", asset_ids=("v1",), audio_duration_s=120.0)
-    assert await rig.router.handle(voice) == BotResponse(title="audio")
-    assert rig.audio.events == [voice]
+
+    assert await rig.router.handle(voice) == BotResponse(title="general")
+    assert rig.transcriber.events == [voice]
+    assert rig.general.contexts[0].user_text == "翡翠放哪"
+    assert rig.calls("route")[0].prompt.current_user_msg == "翡翠放哪"
 
 
 async def test_unsupported_event_gets_the_fixed_reply(rig: Rig) -> None:

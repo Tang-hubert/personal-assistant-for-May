@@ -38,12 +38,14 @@ class Intent(StrEnum):
     LECTURE = "lecture"
     SALES = "sales"
     MEMORY = "memory"
+    IOS = "ios"
 
 
 INTENT_LABELS: dict[Intent, str] = {
     Intent.LECTURE: "📚 整理講座重點",
     Intent.SALES: "💎 寫珠寶推銷文案",
     Intent.MEMORY: "📦 記下東西放哪了",
+    Intent.IOS: "📱 教我用手機",
 }
 
 _CALLBACK_PREFIX = "b"

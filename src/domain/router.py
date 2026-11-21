@@ -2,8 +2,9 @@
 
 Priority: photos go to the aggregator (zero-token, and their one reply comes from there, so the
 budget gate cannot turn a burst into many replies: D1) -> budget at 100% answers the rest
-message with no LLM call -> callbacks, unsupported events, and over-long voice answer without
-an LLM -> only free text pays for a DeepSeek classification.
+message with no LLM call -> callbacks, unsupported events, and too long or too short voice
+answer without an LLM -> free text pays for a DeepSeek classification; voice pays for a
+transcription first and then takes the same path as typed text.
 
 One user's events are handled one at a time under an in-process lock; the partial unique
 index is what guarantees a single active session.
@@ -19,7 +20,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from src.domain import replies
-from src.domain.budget import MAX_AUDIO_S, PromptParts, Turn, truncate_free_text
+from src.domain.budget import PromptParts, Turn, truncate_free_text
 from src.domain.media import IntentSelected
 from src.domain.models import BotResponse, IncomingEvent, TaskCapability
 from src.domain.ports import (
@@ -98,8 +99,10 @@ class RouteHandler(Protocol):
     async def __call__(self, ctx: TurnContext) -> HandlerReply: ...
 
 
-class AudioHandler(Protocol):
-    async def __call__(self, event: IncomingEvent) -> BotResponse: ...
+class Transcriber(Protocol):
+    async def __call__(self, event: IncomingEvent) -> str:
+        """The voice clip as text; empty when nothing intelligible was said."""
+        ...
 
 
 class IntentHandler(Protocol):
@@ -123,7 +126,7 @@ class Router:
         sessions: SessionStorePort,
         batches: PhotoBatches,
         handlers: Mapping[TopicType, RouteHandler],
-        audio_handler: AudioHandler,
+        transcriber: Transcriber,
         intent_handler: IntentHandler,
         clock: Clock,
     ) -> None:
@@ -134,7 +137,7 @@ class Router:
         self._sessions = sessions
         self._batches = batches
         self._handlers = handlers
-        self._audio_handler = audio_handler
+        self._transcriber = transcriber
         self._intent_handler = intent_handler
         self._clock = clock
         self._locks: defaultdict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -162,11 +165,14 @@ class Router:
             case "unsupported":
                 return replies.unsupported_message()
             case "audio":
-                if event.audio_duration_s is None or event.audio_duration_s > MAX_AUDIO_S:
-                    return replies.voice_too_long()
-                return await self._audio_handler(event)
+                if rejection := replies.voice_rejection(event.audio_duration_s or 0.0):
+                    return rejection
+                transcript = await self._transcriber(event)
+                if not transcript.strip():
+                    return replies.voice_unclear()
+                return await self._text(event, transcript)
             case "text":
-                return await self._text(event)
+                return await self._text(event, event.payload_text or "")
 
     async def _callback(self, event: IncomingEvent) -> BotResponse:
         if event.callback_data == replies.FINISH_CALLBACK:
@@ -183,9 +189,9 @@ class Router:
             return outcome
         return await self._intent_handler(event, outcome)
 
-    async def _text(self, event: IncomingEvent) -> BotResponse:
+    async def _text(self, event: IncomingEvent, raw_text: str) -> BotResponse:
         tenant_id, user_id = event.tenant_id, event.user_id
-        text, truncated = truncate_free_text(event.payload_text or "")
+        text, truncated = truncate_free_text(raw_text)
         now = self._clock.now()
 
         session = await self._sessions.get_active(tenant_id=tenant_id, user_id=user_id)
@@ -218,8 +224,10 @@ class Router:
             TurnContext(event=event, route=route, session=session, user_text=text)
         )
         if reply.last_artifact_id is not None:
+            # The artifact's workflow owns the follow-ups, even in a session "你好" opened.
             session = session.evolve(
-                state_json={**session.state_json, ARTIFACT_KEY: reply.last_artifact_id}
+                topic_type=route,
+                state_json={**session.state_json, ARTIFACT_KEY: reply.last_artifact_id},
             )
         await self._sessions.save(
             tenant_id=tenant_id, user_id=user_id, state=commit_turn(session, text, reply.text, now)

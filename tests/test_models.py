@@ -135,7 +135,12 @@ def test_models_are_immutable() -> None:
 
 def test_intent_buttons_fit_the_channel_limits() -> None:
     response = intent_prompt("a" * 32, kept_count=4)
-    assert len(response.actions) == 3
+    assert [a.label for a in response.actions] == [
+        "📚 整理講座重點",
+        "💎 寫珠寶推銷文案",
+        "📦 記下東西放哪了",
+        "📱 教我用手機",
+    ]
     assert all(len(a.label) <= 20 for a in response.actions)
     assert all(len(a.callback_data.encode()) <= 64 for a in response.actions)
     assert all("a" * 32 in a.callback_data for a in response.actions)
