@@ -45,3 +45,12 @@ A Telegram habit of "ack with 處理中..., then send the result" would burn the
 - T1: validator tests for every limit above.
 - T5: CopyTextButton/`<pre>` boundary at 255/256/257 chars; redelivered `update_id` processed once; `unsupported` reply; image document normalization; no handler sends more than one message per event.
 - T2: a media batch emits exactly one `BotResponse`.
+
+## Amendment (T5 rulings, 2026-11-22)
+- **UTF-16 lengths**: Telegram counts `CopyTextButton` text, message text, and captions in UTF-16 code units, so an emoji counts 2. The adapter measures UTF-16 length. A block of 256 Python chars that contains an emoji renders as `<pre>`. A block that fits the button is also shown in the message text, so May can read the copy before she taps to copy it.
+- **One message per response**: text ≤ 4,096 and photo caption ≤ 1,024, measured on the escaped HTML. On overflow the adapter shortens the raw text of the longest block, then the bullets, and escapes again. It never splits an HTML entity and never sends a second message.
+- **Event ids**: `tg:u:<update_id>` for messages and `tg:cb:<callback_query.id>` for button taps, claimed in an in-process bounded set before any side effect. A crash can redeliver updates Telegram had not acknowledged yet. That is accepted for Phase 1 (Q5). Invariant 4 holds within one process lifetime.
+- **Pre-download gates**: voice over 120 s or under 1 s, and any file whose `file_size` exceeds 15 MB, get one fixed reply with no download and no LLM call. For photos, where one burst is many updates, these notices and the `photo_not_received` notice for a failed download are limited to one per chat per 60 s. Accepted photos of the burst still get their one batch reply.
+- **Photo replies degrade to text**: if reading, converting, or uploading the reply photo fails, the adapter sends the same response as one text message. If that also fails, Ops gets an `error` alert with the exception type only.
+- **Updates in order**: PTB runs with its default sequential update processing, so a typed correction never overtakes a voice note that is still downloading.
+- **Allowlist**: only `TELEGRAM_ALLOWED_USER_IDS` in private chats. Strangers get no reply (Q7).

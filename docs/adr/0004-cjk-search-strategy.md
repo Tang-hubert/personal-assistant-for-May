@@ -30,3 +30,8 @@ SQLite FTS5's default `unicode61` tokenizer treats a contiguous run of CJK chara
 - T1: test that `翡翠` finds `翡翠放紅櫃子`, written **red first** (plain `unicode61` over raw text), then green with `search_tokens`.
 - T1: autogenerate against the migrated DB produces no FTS drop operations.
 - T5: memory query injects ≤ 3 records into the prompt.
+
+## Amendment (T5, 2026-11-22)
+- `search_knowledge()` takes an optional `categories` filter. Memory queries pass `item_location`, so a sales copy that mentions 翡翠 never answers "翡翠放哪".
+- `update_knowledge()` rewrites `search_tokens` in place. The existing `AFTER UPDATE OF search_tokens` trigger keeps the FTS5 copy in sync.
+- Keywords for a photo save come from the Gemini call that already reads the photos. Text saves and queries use `TEXT_FAST_ROUTE`.

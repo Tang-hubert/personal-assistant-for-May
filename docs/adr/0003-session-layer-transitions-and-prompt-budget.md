@@ -86,3 +86,9 @@ T2 implements G4. T3 and T4 implement G1–G3.
 - T3 DoD (f): 80% alert once per Taipei day across a simulated restart.
 - T4: Layer-1 completion opens exactly one Layer-2 session with only `last_artifact_id` + `workflow`.
 - T2: `media_batches` orphan recovery idempotent.
+
+## Amendment (T5 rulings Q1–Q8, 2026-11-22)
+- **Voice joins the text path**: a voice event pays one `MULTIMODAL_AUDIO` transcription, then its transcript is handled exactly like typed text (850-char cap, classification, Layer-2 stickiness, committed turn). An empty transcript (silence or noise) gets a fixed retry reply with no classification and no session change.
+- **Memory stash**: the 📦 button saves an `item_location` item from ≤ 3 photos (Layer 1) and opens the usual Layer-2 session. In that session a voice or text location note updates the same item in place (Q3). A query extracts keywords through `TEXT_FAST_ROUTE` with 0 history, searches only `item_location`, and puts ≤ 3 records (≤ 400 tokens each, ≤ 1,200 total) in `retrieved_context`. The answer call starts with the Taiwan tone rule. Zero hits get a fixed reply with no answer call. The answer names the record it used (`pick`); that record becomes `last_artifact_id`, so "我把它移到保險箱了" right after updates it in place. When no record answers the question (`pick` null or out of range), the reply has a neutral title, no photo, and no artifact. An `update` that names a different item than the session's artifact (neither name contains the other) saves a new item instead of overwriting it.
+- **iOS helper**: a text or voice question, or the 4th button `📱 教我用手機` on screenshots (≤ 2 images), returns 3 steps and saves an `ios_guide` item (Q1, Q2). A reply with fewer than 3 steps is unusable (busy reply, nothing saved); extra steps are dropped. A follow-up puts the previous guide in `retrieved_context`.
+- **General route**: a fixed help menu, 0 LLM after classification (Q4).

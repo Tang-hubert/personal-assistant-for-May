@@ -1,8 +1,9 @@
-# System Architecture Specification (v1.3.2)
+# System Architecture Specification (v1.3.4)
 
 > v1.3 (2026-11-21): Applies Architect rulings on the `/architect` blind-spot review. Rationale lives in `docs/adr/0001`–`0005`; findings and rulings trace in `docs/reviews/2026-11-21-architect-blind-spots.md`.
 > v1.3.1 (2026-11-21): Resolves G1–G4 (prompt budget closure, per-turn truncation, `awaiting_intent` TTL). See ADR-0003.
 > v1.3.2 (2026-11-21): T3 rulings D1–D6. Multimodal budget 7,500 with media token estimates, `audio_duration_s`, photo events bypass the budget gate, tenant-level FinOps aggregate exception, 402/429 classification, DeepSeek thinking disabled. See ADR-0003 "Amendment (T3)".
+> v1.3.4 (2026-11-22): T5 rulings Q1–Q8. Voice is transcribed and then routed like typed text; a 4th intent button for iPhone screenshots; `ios_guide` knowledge category; memory search filters by category and updates locations in place; Telegram limits measured in UTF-16; 15 MB pre-download cap; idempotent account seed. See ADR-0002 and ADR-0003 "Amendment (T5)".
 
 ## 1. High-Level Topology
 
@@ -43,12 +44,13 @@
 To prevent feature lock-in to Telegram, `src/domain/models.py` enforces strict LCD (Lowest Common Denominator) contracts. Every limit below is a Pydantic validator, not a convention.
 
 ### Normalized `IncomingEvent`
-- `event_id: str` — idempotency key (Telegram `update_id`, LINE `webhookEventId`). Processing dedups on it before any side effect.
+- `event_id: str` — idempotency key (Telegram `tg:u:<update_id>` for messages and `tg:cb:<callback_query.id>` for button taps, LINE `webhookEventId`). The adapter claims it in an in-process bounded set (4,096 ids) before any side effect, download included. A crash can still redeliver the few updates Telegram had not yet acknowledged (accepted, Q5).
 - `tenant_id: str`, `user_id: str` — internal IDs resolved from `channel_identities` (ADR-0001). Workflows never see channel user IDs.
 - `channel: Literal["telegram", "line"]`
 - `event_type: Literal["text", "audio", "image", "action_callback", "unsupported"]`
   - Image documents (iPhone "send as file", incl. HEIC) are normalized to `"image"` by the adapter.
   - Stickers, video, location, and other files map to `"unsupported"` and get one fixed, gentle reply.
+  - Pre-download gates (0 download, 0 LLM, one fixed reply): voice over 120 s or under 1 s (`replies.voice_rejection`, shared with the router), and any photo, document, or voice whose platform `file_size` exceeds 15 MB. A photo that is too large or whose download fails never reaches the aggregator, so one burst could produce many such replies: photo notices (`file_too_large` or `photo_not_received`) are limited to one per chat per 60 s, measured with the injected `Clock`. Ops gets one alert (exception type only) with each notice, not one per failed photo.
 - `media_group_id: str | None` (Telegram `media_group_id` / LINE `imageSet.id`), optional `group_index: int | None`, `group_total: int | None` (LINE `imageSet` provides both; Telegram does not).
 - `reply_target: ReplyTarget` (ADR-0002) — `address: str` (persistent: Telegram `chat_id` / LINE `userId`), `ephemeral_token: str | None` (LINE `replyToken`; `None` on Telegram), `token_expires_at: datetime | None`. Only adapters read it; adapters choose reply vs push.
 - `payload_text: str | None`. The contract does not truncate it. The pipeline deterministically truncates any free text to **850 chars** before any LLM call and adds a gentle notice (ADR-0003).
@@ -61,7 +63,7 @@ To prevent feature lock-in to Telegram, `src/domain/models.py` enforces strict L
 - `bullets: list[str]` (Max 3 concise plain-Mandarin points, senior-readable)
 - `alt_text: str` — derived from `title + bullets`, truncated to 400 chars (LINE Flex `altText` requirement). Not hand-written by workflows.
 - `copyable_blocks: list[CopyableBlock]` (Each has `label`, `body_text` max **1,000** chars, optional `warning_note`)
-  - *TelegramAdapter*: `body_text` ≤ 256 chars → `CopyTextButton`; 257–1,000 chars → HTML-escaped `<pre>` block (tap-to-copy).
+  - *TelegramAdapter*: `body_text` ≤ 256 chars → `CopyTextButton`; 257–1,000 chars → HTML-escaped `<pre>` block (tap-to-copy). Telegram counts in UTF-16 code units, so the adapter measures UTF-16 length (an emoji counts 2).
   - *LineAdapter (Phase 2)*: Flex Bubble with native `ClipboardAction`.
 - `actions: list[ActionButton]` (Max 4 buttons; each has `label` max 20 chars, `callback_data` as a short server-side token such as `b:<batch_id>:lecture` (≤ 64 bytes), optional `prefer_voice_input: bool`)
   - *TelegramAdapter* renders as InlineKeyboardMarkup.
@@ -73,6 +75,8 @@ To prevent feature lock-in to Telegram, `src/domain/models.py` enforces strict L
 - One `IncomingEvent` (or one media batch) produces **at most one** `BotResponse`.
 - Progress feedback uses chat actions only (Telegram `typing` / `upload_photo`, LINE loading animation). Intermediate text messages such as "處理中..." are forbidden, because on LINE they would consume the single-use reply token.
 - Adapters escape all LLM/user text for the target markup (Telegram HTML).
+- One `BotResponse` renders as exactly one Telegram message: text ≤ 4,096 and photo caption ≤ 1,024 (UTF-16, measured on the escaped HTML). On overflow the adapter shortens the raw text of the longest block, then the bullets, and escapes again, so an HTML entity is never split.
+- Telegram accepts only allowlisted users (`TELEGRAM_ALLOWED_USER_IDS`) in private chats. Strangers are ignored without a reply; the log records only their numeric ID. Because chats are private, `chat_id` equals the user ID, which lets `ChannelPort.send` resolve the owner to read `image_asset_id`.
 
 ## 3. Dual Direct LLM Routing (`src/adapters/llm/`)
 No third-party aggregators (no OpenRouter). Direct prepaid SDKs only (auto-recharge disabled):
@@ -112,10 +116,11 @@ Every LLM call MUST stay within a fixed prompt budget regardless of how many mon
 ### 4.3 The Three Layers
 1. **Layer 1 — Stateless One-Shot Workflows (0 History Tokens)**:
    - `lecture_digest`, `sales_copy` (initial draft), `memory_stash` (save), and `ios_helper` (initial question) inject **zero prior conversation history**.
+   - Photo batches offer four intent buttons: `📚 整理講座重點`, `💎 寫珠寶推銷文案`, `📦 記下東西放哪了`, `📱 教我用手機` (iPhone screenshots → `ios_helper`).
    - On completion the result is saved to `knowledge_items`, then a **clean Layer-2 follow-up session is opened (or reset)** with `recent_turns = []` and `state_json = {"last_artifact_id": "...", "workflow": "..."}` — a reference, never the artifact text.
 2. **Layer 2 — Hard-Bounded Active Topic Session (`topic_sessions`)**:
    - Used ONLY for immediate follow-up tweaks (e.g., "把剛剛的文案改得更親切一點").
-   - **Follow-up stickiness**: while the session holds `last_artifact_id` and the classifier reports no topic shift, the message goes to the handler of the session's `topic_type`, whatever route the classifier named. A rewrite saves a new `knowledge_items` row and the router moves `last_artifact_id` to it (`HandlerReply.last_artifact_id`), so the next tweak builds on the latest version.
+   - **Follow-up stickiness**: while the session holds `last_artifact_id` and the classifier reports no topic shift, the message goes to the handler of the session's `topic_type`, whatever route the classifier named. A rewrite saves a new `knowledge_items` row and the router moves `last_artifact_id` to it (`HandlerReply.last_artifact_id`), so the next tweak builds on the latest version. The same commit sets the session's `topic_type` to the route that produced the artifact, so a memory or iOS answer given inside a session that "你好" opened as `general` keeps its follow-ups.
    - **Invariant after every commit**: `len(recent_turns) <= 6` (3 user + 3 assistant) AND history ≤ 1,500 estimated tokens.
    - **Per-turn cap**: every message written to `recent_turns` is deterministically truncated to ≤ 250 tokens (6 × 250 = 1,500). Full long outputs (copy, reports) live only in `knowledge_items` and reach the prompt through `state_json.last_artifact_id` → `retrieved_context`. They are never duplicated into `recent_turns`.
    - **Auto-Close Triggers**: (a) idle > 15 minutes — evaluated lazily when the next message arrives (no scheduler); (b) `TEXT_FAST_ROUTE` detects topic change; (c) user taps the finish button.
@@ -129,6 +134,8 @@ Every LLM call MUST stay within a fixed prompt budget regardless of how many mon
    - Exception: photo events skip the budget gate and are still collected into a batch that gets its intent buttons. A per-photo rest message would break the single-response invariant (ADR-0002). The intent callback is gated instead.
 2. Button callbacks and photo batches → deterministic routing (0 LLM).
 3. Free text only → `TEXT_FAST_ROUTE` (DeepSeek) for intent / topic-shift detection.
+4. Voice → one `MULTIMODAL_AUDIO` transcription (Gemini), then the transcript takes the free-text path above: 850-char cap, classification, Layer-2 stickiness, committed turn. So May can add a price or a note by voice inside a follow-up. A silent or noise-only clip gets a fixed "please say it again" reply with no DeepSeek call and no session change.
+5. The `general` route answers with a fixed help menu (0 LLM after classification).
 
 ### 4.5 Concurrency
 - Single-process assumption for Phase 1.
@@ -162,12 +169,13 @@ Every LLM call MUST stay within a fixed prompt budget regardless of how many mon
 5. `media_batches`: `id`, `tenant_id`, `user_id`, `channel`, `media_group_id`, `status` (`collecting|filtered|awaiting_intent|done`), `raw_count`, `kept_count`, `reply_address` (persistent chat address for orphan recovery; never an ephemeral token), `intent_expires_at`
 6. `media_assets`: `id`, `batch_id` (nullable: the adapter saves the file before any batch exists, and voice never joins one), `tenant_id`, `user_id`, `external_file_id` (cache only), `media_type`, `local_path` (POSIX string relative to `DATA_DIR`), `phash`, `blur_score`, `is_kept`, `is_blurry`
    - **Invariant**: every asset keeps its original file locally. `external_file_id` is never the only copy (Phase 2 LINE needs our own bytes).
-7. `knowledge_items`: `id`, `tenant_id`, `user_id`, `category` (`jewelry|product|lecture|item_location|crm`), `title`, `content_text`, `structured_json`, `primary_asset_id`, `search_tokens` (+ FTS5 virtual table over `search_tokens`, ADR-0004)
+7. `knowledge_items`: `id`, `tenant_id`, `user_id`, `category` (`jewelry|product|lecture|item_location|crm|ios_guide`), `title`, `content_text`, `structured_json`, `primary_asset_id`, `search_tokens` (+ FTS5 virtual table over `search_tokens`, ADR-0004)
+   - Memory queries search only `item_location`. A location added in a follow-up updates the item in place (`StoragePort.update_knowledge`), so an old location is never found. Sales rewrites still save new rows.
 8. `llm_usage_ledger`: `id`, `tenant_id`, `user_id`, `provider`, `model`, `prompt_tokens`, `completion_tokens`, `estimated_cost_usd`, `workflow_name`
 
 ## 6. FinOps Guardian & Dual-Track Taiwan Direct-Sales Compliance
 - **FinOps**: Before EVERY LLM call, sum the tenant's ledger for the current Asia/Taipei day. The day boundary is computed in Python with `ZoneInfo("Asia/Taipei")` and converted to a UTC range for the query — never from process local time (ADR-0005). `>= 80%`: warn Discord Ops once per day (guarded by `tenants.budget_alert_80_date`, claimed by a conditional UPDATE before sending, so restarts and races never resend). `>= 100%`: block LLM, return friendly rest message, alert Discord Ops (deduplicated in memory per tenant and Taipei day; a restart may resend it once). The check runs before the call, so concurrent users of one tenant can overshoot by at most one call each (single-process, family scale).
-- **Test isolation**: `tests/conftest.py` autouse fixture forces `APP_ENV=test` + `TEST_NO_SEND=1` and blocks unmocked outbound network at the httpx and httpx2 transports (google-genai and openai ship on httpx2), `socket.connect`, and `asyncio` `create_connection` (the Windows proactor loop bypasses `socket.connect`), so the guard holds even when `pytest` runs without `scripts/test.py`.
+- **Test isolation**: `tests/conftest.py` autouse fixture forces `APP_ENV=test` + `TEST_NO_SEND=1` and blocks unmocked outbound network at the httpx and httpx2 transports (google-genai and openai ship on httpx2), `socket.connect`, and `asyncio` `create_connection` (the Windows proactor loop bypasses `socket.connect`), so the guard holds even when `pytest` runs without `scripts/test.py`. The guard raises `NetworkBlockedError` (a `RuntimeError` subclass in `src/adapters/errors.py`). `DiscordWebhookNotifier` re-raises only that error and logs and swallows every other send failure, such as the closed-client error at shutdown.
 - **Compliance (`src/domain/compliance.py`)**: Deterministic scanner using `src/domain/tw_prohibited_terms.yaml`. The dictionary ships with the code inside the image; `data/` is the runtime volume and is git-ignored. Always generate Version A (safe persuasive experience framing) + optional Version B (polished original intent with explicit legal risk `warning_note`). Version A always passes scan → `sanitize()` → 0 hits after the LLM, on the initial draft and on every follow-up rewrite. `sanitize()` replaces longest terms first, runs at most 3 rounds, then deletes survivors, so it never raises. Version B is kept only when it is non-empty and contains a prohibited term; its `warning_note` names the terms and laws.
 - **Taiwan tone**: every Gemini prompt requires Traditional Chinese in everyday Taiwan wording and forbids Mainland terms (視頻 → 影片, 軟件 → 軟體, 親 → 您).
 
@@ -190,4 +198,5 @@ Every LLM call MUST stay within a fixed prompt budget regardless of how many mon
 - **Volumes**: `./data:/app/data` bind mount is for Linux prod only. On Windows, run the app natively with `uv run`; never open one SQLite file from a native process and a container at the same time.
 - **Container runtime**: exec-form `CMD`, `init: true`, non-root UID owning `/app/data`, `restart: unless-stopped`, json-file log rotation (`max-size` / `max-file`).
 - **Shutdown**: graceful shutdown is delegated to PTB `run_polling()`; no custom `loop.add_signal_handler` (unsupported on Windows).
-- **Ops**: scheduled `sqlite3 .backup` of the DB; `.env` must be UTF-8 without BOM.
+- **Ops**: scheduled `sqlite3 .backup` of the DB; `.env` must be UTF-8 without BOM. Runbook: `docs/DEPLOY_LINUX.md`.
+- **Startup order** (`src/main.py`): `alembic upgrade head` → idempotent seed (fixed tenant `default`; one `users` row per allowlisted Telegram ID; existing identities untouched) → `BatchAggregator.recover_orphans()` → PTB `run_polling()`. On stop, pending photo batches are drained while the bot can still send. An empty allowlist refuses to start. The `httpx` logger is held at WARNING, because PTB request logs carry the bot token in the URL. A log filter redacts the token from every record, and a token Telegram rejects stops the process with a message that does not contain it.
