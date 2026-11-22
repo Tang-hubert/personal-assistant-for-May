@@ -4,6 +4,8 @@ follow-up uses the same dual track, because May usually adds her claims there.""
 
 from __future__ import annotations
 
+import logging
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -33,6 +35,10 @@ from src.workflows.common import (
     session_artifact,
 )
 
+logger = logging.getLogger(__name__)
+# Keeps each sentence's own end mark, so a restored claim reads as she wrote it.
+_SENTENCE_END = re.compile(r"(?<=[。！？!?\n])")
+
 WORKFLOW = "sales_copy"
 FOLLOWUP_WORKFLOW = "sales_copy_followup"
 TEXT_WORKFLOW = "sales_copy_text"
@@ -43,7 +49,9 @@ _SCHEMA = (
     '只輸出 JSON：{"category":"jewelry 或 product","title":"15字內標題",'
     '"version_a":"安全版文案","version_b":"原意版文案或 null"}。'
     "version_a 用外觀、工藝、心情、送禮情境打動人，絕不寫療效、治病、保證效果或收入。"
-    "version_b 只在長輩想強調功效或收益時才寫，保留她的原意；沒有就給 null。每版 300 字內。"
+    "長輩的訊息裡有功效、療效、保證或收益的說法時，version_b 一定要寫，"
+    "而且一字不改保留她原本的那些說法（例如「保證有效」「降血壓」）；沒有就給 null。"
+    "每版 300 字內。"
 )
 SALES_SYSTEM = TW_STYLE + "你幫一位長輩寫珠寶或商品的社群推銷文案。" + _SCHEMA
 FOLLOWUP_SYSTEM = TW_STYLE + "[context] 是目前的安全版文案。依長輩這次的要求改寫。" + _SCHEMA
@@ -75,11 +83,28 @@ class DualTrack(BaseModel):
     hits_b: tuple[ComplianceHit, ...]
 
 
-def dual_track(out: SalesOut) -> DualTrack:
+def risky_sentences(text: str) -> str:
+    """Her own sentences that carry a prohibited claim, minus any leading instruction that
+    ends in a colon (幫我改寫成文案 + colon)."""
+    kept = []
+    for sentence in _SENTENCE_END.split(text):
+        claim = re.split(r"[：:]", sentence)[-1].strip()
+        if claim and scan(claim):
+            kept.append(claim)
+    return "".join(claim if claim[-1] in "。！？!?" else f"{claim}。" for claim in kept)
+
+
+def dual_track(out: SalesOut, her_words: str | None = None) -> DualTrack:
+    """Version B keeps May's original intent. Gemini sometimes drops or softens it, so when
+    her own words carry a risky claim that B lost, her risky sentences are put back."""
     hits_a = scan(out.version_a)
     version_a = clip(sanitize(out.version_a), BLOCK_MAX_CHARS)
     version_b = clip(out.version_b, BLOCK_MAX_CHARS) if out.version_b else None
     hits_b = scan(version_b) if version_b else ()
+    if not hits_b and her_words and (claims := risky_sentences(her_words)):
+        logger.info("version_b restored from her own claims")
+        version_b = clip(f"{out.version_b or out.version_a}\n{claims}", BLOCK_MAX_CHARS)
+        hits_b = scan(version_b)
     return DualTrack(
         version_a=version_a,
         version_b=version_b if hits_b else None,
@@ -185,7 +210,7 @@ class SalesCopy:
             )
         )
         out = parse_output(result, SalesOut, workflow=FOLLOWUP_WORKFLOW)
-        track = dual_track(out)
+        track = dual_track(out, ctx.user_text)
         artifact_id = await self._save(
             tenant_id,
             user_id,
@@ -217,7 +242,7 @@ class SalesCopy:
             )
         )
         out = parse_output(result, SalesOut, workflow=TEXT_WORKFLOW)
-        track = dual_track(out)
+        track = dual_track(out, ctx.user_text)
         artifact_id = await self._save(tenant_id, user_id, out.category, out.title, track, None)
         return HandlerReply(
             text=f"已寫好文案：{track.version_a[:80]}",

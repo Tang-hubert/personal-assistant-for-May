@@ -94,3 +94,58 @@ async def test_a_short_lecture_question_without_notes_asks_for_material(wf: Work
     assert await wf.say("我想問今天講座的事") == send_material_first()
     assert wf.calls("lecture_digest_text") == []
     assert wf.knowledge_rows() == []
+
+
+RISKY = "幫我把這段改寫成更好的推銷文案：這瓶酵素喝了保證有效、可以降血壓治失眠！"
+SOFT_B = "這瓶酵素天天喝，讓您每天都有好精神。"
+
+
+async def test_her_risky_claim_survives_as_version_b_when_the_model_drops_it(
+    wf: WorkflowRig,
+) -> None:
+    """Live T5.1 finding: Gemini returned no Version B for her own 保證有效 claim."""
+    wf.replies["route"] = ROUTE_SALES
+    wf.replies["sales_copy_text"] = sales_json(CLEAN_A)  # version_b: null
+
+    response = await wf.say(RISKY)
+
+    assert response is not None
+    block_a, block_b = response.copyable_blocks
+    assert scan(block_a.body_text) == ()
+    assert block_b.body_text.startswith(CLEAN_A)
+    assert "這瓶酵素喝了保證有效、可以降血壓治失眠！" in block_b.body_text
+    assert "幫我把這段改寫" not in block_b.body_text  # her instruction is not copy
+    assert block_b.warning_note is not None and "保證有效" in block_b.warning_note
+
+
+async def test_a_softened_version_b_gets_her_claim_back(wf: WorkflowRig) -> None:
+    wf.replies["route"] = ROUTE_SALES
+    wf.replies["sales_copy_text"] = sales_json(CLEAN_A, SOFT_B)
+
+    response = await wf.say(RISKY)
+
+    assert response is not None
+    _, block_b = response.copyable_blocks
+    assert block_b.body_text.startswith(SOFT_B)
+    assert "保證有效" in block_b.body_text
+
+
+async def test_a_followup_claim_also_keeps_version_b(wf: WorkflowRig) -> None:
+    wf.replies["route"] = ROUTE_SALES
+    wf.replies["sales_copy_text"] = sales_json(CLEAN_A)
+    await wf.say(ARTICLE.replace("睡得比較好，", ""))
+    wf.replies["sales_copy_followup"] = sales_json(CLEAN_A)
+
+    response = await wf.say("再加一句：戴了保證有效")
+
+    assert response is not None and len(response.copyable_blocks) == 2
+    assert "戴了保證有效" in response.copyable_blocks[1].body_text
+
+
+async def test_clean_words_still_get_no_version_b(wf: WorkflowRig) -> None:
+    wf.replies["route"] = ROUTE_SALES
+    wf.replies["sales_copy_text"] = sales_json(CLEAN_A)
+
+    response = await wf.say("幫我寫翡翠手鍊的文案，綠色很漂亮，適合送媽媽。")
+
+    assert response is not None and len(response.copyable_blocks) == 1
