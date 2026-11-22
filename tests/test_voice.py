@@ -34,6 +34,7 @@ async def test_silence_is_unclear_after_one_transcription_and_no_routing(
 
 async def test_the_transcription_call_carries_the_clip_and_its_duration(wf: WorkflowRig) -> None:
     wf.replies["voice_transcribe"] = _heard("你好")
+    wf.replies["route"] = json.dumps({"route": "general", "topic_shift": False})
     await wf.speak(12.0)
 
     (call,) = wf.calls("voice_transcribe")
@@ -47,6 +48,7 @@ async def test_a_long_transcript_is_cut_to_850_chars_and_the_reply_says_so(
     wf: WorkflowRig,
 ) -> None:
     wf.replies["voice_transcribe"] = _heard("翡" * 900)
+    wf.replies["route"] = json.dumps({"route": "general", "topic_shift": False})
 
     response = await wf.speak()
 

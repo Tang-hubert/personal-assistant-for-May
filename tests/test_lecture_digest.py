@@ -23,7 +23,8 @@ async def test_lecture_tap_returns_one_digest_with_three_takeaways(wf: WorkflowR
 
 
 async def test_lecture_call_is_multimodal_with_zero_history(wf: WorkflowRig) -> None:
-    await wf.say("我想寫一段翡翠手鍊的文案")  # leaves an active session holding turns
+    wf.replies["route"] = json.dumps({"route": "general", "topic_shift": False})
+    await wf.say("今天天氣真好")  # leaves an active session holding turns
     before = await wf.active()
     assert before is not None and before.recent_turns
 

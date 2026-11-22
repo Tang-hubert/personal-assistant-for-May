@@ -35,6 +35,7 @@ from src.workflows.common import (
 
 WORKFLOW = "sales_copy"
 FOLLOWUP_WORKFLOW = "sales_copy_followup"
+TEXT_WORKFLOW = "sales_copy_text"
 MAX_SALES_IMAGES = 3
 MAX_OUTPUT = 1500
 
@@ -46,6 +47,12 @@ _SCHEMA = (
 )
 SALES_SYSTEM = TW_STYLE + "你幫一位長輩寫珠寶或商品的社群推銷文案。" + _SCHEMA
 FOLLOWUP_SYSTEM = TW_STYLE + "[context] 是目前的安全版文案。依長輩這次的要求改寫。" + _SCHEMA
+TEXT_SYSTEM = (
+    TW_STYLE
+    + "你幫一位長輩寫珠寶或商品的社群推銷文案。她沒有傳照片，"
+    + "她的訊息就是原料（她寫的文章或口述），照她提供的內容寫，不要編造她沒說的細節。"
+    + _SCHEMA
+)
 
 
 class SalesOut(BaseModel):
@@ -159,7 +166,7 @@ class SalesCopy:
             self._storage, tenant_id=tenant_id, user_id=user_id, session=ctx.session
         )
         if item is None:
-            return HandlerReply(text="請先傳商品照片", response=send_photos_first())
+            return await self._draft_from_text(ctx)
         result = await self._llm.generate(
             LLMRequest(
                 tenant_id=tenant_id,
@@ -194,6 +201,30 @@ class SalesCopy:
             last_artifact_id=artifact_id,
         )
 
+    async def _draft_from_text(self, ctx: TurnContext) -> HandlerReply:
+        """No artifact yet: May's own words are the material. Zero history (ADR-0003); the
+        router turns the session into the Layer-2 follow-up through last_artifact_id."""
+        tenant_id, user_id = ctx.event.tenant_id, ctx.event.user_id
+        result = await self._llm.generate(
+            LLMRequest(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                workflow_name=TEXT_WORKFLOW,
+                capability=Cap.COPYWRITING_TW,
+                prompt=PromptParts(system=TEXT_SYSTEM, current_user_msg=ctx.user_text),
+                max_output_tokens=MAX_OUTPUT,
+                json_output=True,
+            )
+        )
+        out = parse_output(result, SalesOut, workflow=TEXT_WORKFLOW)
+        track = dual_track(out)
+        artifact_id = await self._save(tenant_id, user_id, out.category, out.title, track, None)
+        return HandlerReply(
+            text=f"已寫好文案：{track.version_a[:80]}",
+            response=render(out.title, track),
+            last_artifact_id=artifact_id,
+        )
+
     async def _save(
         self,
         tenant_id: str,
@@ -218,10 +249,3 @@ class SalesCopy:
                 primary_asset_id=primary_asset_id,
             ),
         )
-
-
-def send_photos_first() -> BotResponse:
-    return BotResponse(
-        title="先傳商品照片給我",
-        bullets=("請拍 1 到 3 張商品照片傳給我", "再按「💎 寫珠寶推銷文案」"),
-    )

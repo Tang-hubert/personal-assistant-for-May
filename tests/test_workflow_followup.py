@@ -5,7 +5,6 @@ from src.domain.budget import MAX_TURNS, SLOT_TURNS, turns_tokens
 from src.domain.compliance import scan
 from src.domain.media import Intent
 from src.domain.session import ARTIFACT_KEY
-from src.workflows.sales_copy import send_photos_first
 from tests.workflow_helpers import CLEAN_A, WorkflowRig, sales_json
 
 WARMER_A = "這條翡翠手鍊溫潤又有氣質，媽媽戴起來一定很開心喔！"
@@ -67,13 +66,14 @@ async def test_each_rewrite_becomes_the_base_of_the_next(wf: WorkflowRig) -> Non
 async def test_followup_after_idle_window_starts_clean(wf: WorkflowRig) -> None:
     await _sales_done(wf)
     wf.clock.instant += timedelta(minutes=16)
+    wf.replies["sales_copy_text"] = sales_json(WARMER_A)
 
-    response = await wf.say("改親切一點")
+    await wf.say("改親切一點")
 
-    assert response == send_photos_first()
+    # The old copy is gone from context: her words are drafted from scratch (T5.1 #4).
     assert wf.calls("sales_copy_followup") == []
-    session = await wf.active()
-    assert session is not None and ARTIFACT_KEY not in session.state_json
+    (call,) = wf.calls("sales_copy_text")
+    assert call.prompt.retrieved_context == "" and call.prompt.recent_turns == ()
 
 
 async def test_followup_sticks_to_the_artifact_workflow_unless_the_topic_shifts(

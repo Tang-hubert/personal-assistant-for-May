@@ -1,3 +1,5 @@
+import json
+
 from src.domain import replies
 from src.domain.compliance import scan
 from src.domain.media import BatchStatus, Intent
@@ -65,6 +67,7 @@ async def test_overlong_copy_is_clipped_to_the_block_limit(wf: WorkflowRig) -> N
 
 
 async def test_sales_starts_with_zero_history_and_one_followup_session(wf: WorkflowRig) -> None:
+    wf.replies["route"] = json.dumps({"route": "general", "topic_shift": False})
     await wf.say("先聊點別的")
     await wf.tap(await wf.photo_batch(), Intent.SALES)
 

@@ -29,14 +29,24 @@ from src.workflows.common import (
 
 WORKFLOW = "lecture_digest"
 FOLLOWUP_WORKFLOW = "lecture_followup"
+TEXT_WORKFLOW = "lecture_digest_text"
+# Fewer characters than this is a question about a lecture, not notes to digest.
+MIN_NOTES_CHARS = 30
 MAX_OUTPUT = 800
 FOLLOWUP_MAX_OUTPUT = 400
 
-LECTURE_SYSTEM = TW_STYLE + (
-    "你在幫一位長輩整理講座的照片（投影片或筆記）。只輸出 JSON："
-    '{"title":"15字內的講座主題","takeaways":["重點1","重點2","重點3"],'
+_LECTURE_SCHEMA = (
+    '只輸出 JSON：{"title":"15字內的講座主題","takeaways":["重點1","重點2","重點3"],'
     '"purpose":"這場講座想讓聽眾做什麼","reminder":"給長輩的溫馨提醒"}。'
-    "重點剛好 3 個，每個一句白話、30 字內；看不清楚的內容不要亂猜。"
+    "重點剛好 3 個，每個一句白話、30 字內；"
+)
+LECTURE_SYSTEM = TW_STYLE + (
+    "你在幫一位長輩整理講座的照片（投影片或筆記）。" + _LECTURE_SCHEMA + "看不清楚的內容不要亂猜。"
+)
+LECTURE_TEXT_SYSTEM = TW_STYLE + (
+    "你在幫一位長輩整理講座內容，她的訊息是她打的筆記或口述。"
+    + _LECTURE_SCHEMA
+    + "她沒提到的內容不要亂猜。"
 )
 FOLLOWUP_SYSTEM = TW_STYLE + (
     "[context] 是之前整理好的講座筆記。根據筆記回答長輩的追問，筆記沒寫的就老實說不知道。"
@@ -98,31 +108,8 @@ class LectureDigest:
             )
         )
         out = parse_output(result, LectureOut, workflow=WORKFLOW)
-        title = clip(out.title, 30)
-        artifact_id = await self._storage.save_knowledge(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            item=NewKnowledgeItem(
-                category="lecture",
-                title=title,
-                content_text=_content(out),
-                structured_json=out.model_dump(mode="json"),
-                primary_asset_id=assets[0] if assets else None,
-            ),
-        )
-        response = BotResponse(
-            title=title,
-            bullets=tuple(clip(t, BULLET_MAX_CHARS) for t in out.takeaways[:3]),
-            copyable_blocks=(
-                CopyableBlock(
-                    label="這場講座的目的／溫馨提醒",
-                    body_text=clip(
-                        f"目的：{out.purpose}\n溫馨提醒：{out.reminder}", BLOCK_MAX_CHARS
-                    ),
-                ),
-            ),
-            actions=(replies.finish_button(),),
-        )
+        artifact_id = await self._save(tenant_id, user_id, out, assets[0] if assets else None)
+        response = digest_response(out)
         await open_followup(
             self._sessions,
             tenant_id=tenant_id,
@@ -145,7 +132,7 @@ class LectureDigest:
             self._storage, tenant_id=tenant_id, user_id=user_id, session=ctx.session
         )
         if item is None:
-            return HandlerReply(text="請先傳講座照片", response=send_photos_first())
+            return await self._digest_text(ctx)
         result = await self._llm.generate(
             LLMRequest(
                 tenant_id=tenant_id,
@@ -174,9 +161,67 @@ class LectureDigest:
             ),
         )
 
+    async def _digest_text(self, ctx: TurnContext) -> HandlerReply:
+        """No artifact yet: typed or spoken notes are digested like photos, with zero history;
+        the router turns the session into the Layer-2 follow-up through last_artifact_id."""
+        if len(ctx.user_text.strip()) < MIN_NOTES_CHARS:
+            return HandlerReply(text="請先給我講座內容", response=send_material_first())
+        tenant_id, user_id = ctx.event.tenant_id, ctx.event.user_id
+        result = await self._llm.generate(
+            LLMRequest(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                workflow_name=TEXT_WORKFLOW,
+                capability=Cap.COPYWRITING_TW,
+                prompt=PromptParts(system=LECTURE_TEXT_SYSTEM, current_user_msg=ctx.user_text),
+                max_output_tokens=MAX_OUTPUT,
+                json_output=True,
+            )
+        )
+        out = parse_output(result, LectureOut, workflow=TEXT_WORKFLOW)
+        artifact_id = await self._save(tenant_id, user_id, out, None)
+        return HandlerReply(
+            text="\n".join(out.takeaways),
+            response=digest_response(out),
+            last_artifact_id=artifact_id,
+        )
 
-def send_photos_first() -> BotResponse:
+    async def _save(
+        self, tenant_id: str, user_id: str, out: LectureOut, primary_asset_id: str | None
+    ) -> str:
+        return await self._storage.save_knowledge(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            item=NewKnowledgeItem(
+                category="lecture",
+                title=out.title,
+                content_text=_content(out),
+                structured_json=out.model_dump(mode="json"),
+                primary_asset_id=primary_asset_id,
+            ),
+        )
+
+
+def digest_response(out: LectureOut) -> BotResponse:
     return BotResponse(
-        title="先傳講座照片給我",
-        bullets=("請把投影片或筆記拍下來傳給我", "再按「📚 整理講座重點」"),
+        title=out.title,
+        bullets=out.takeaways,
+        copyable_blocks=(
+            CopyableBlock(
+                label="這場講座的目的／溫馨提醒",
+                body_text=clip(f"目的：{out.purpose}\n溫馨提醒：{out.reminder}", BLOCK_MAX_CHARS),
+            ),
+        ),
+        actions=(replies.finish_button(),),
+    )
+
+
+def send_material_first() -> BotResponse:
+    return BotResponse(
+        title="把講座內容給我",
+        bullets=(
+            "可以直接貼上講座的文字",
+            "或按住麥克風說給我聽",
+            "也可以拍投影片照片傳給我",
+        ),
     )
