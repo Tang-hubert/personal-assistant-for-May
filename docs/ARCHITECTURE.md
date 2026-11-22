@@ -89,8 +89,9 @@ No third-party aggregators (no OpenRouter). Direct prepaid SDKs only (auto-recha
 | `TEXT_FAST_ROUTE` (Intent routing, slot extract, keywords) | `deepseek` (`DEEPSEEK_MODEL`) | `gemini` | Ultra-low cost fast text processing |
 
 - Handle `HTTP 402` (Prepaid balance exhausted) and `HTTP 429` cleanly: alert Discord Ops and reply to user gently.
-  - Classification: `402` → balance exhausted (Ops `critical`). Gemini `429` whose message mentions depleted prepayment credits is also balance exhausted (Google's behavior before it switched to 402). Any other `429` → rate limited (Ops `warning`). `5xx`, timeouts, and connection errors → provider error. The same (provider, reason) alert is throttled to once per 15 minutes.
-  - Fallback per the table applies only to text-only requests, and each fallback attempt passes the budget gate again. `MULTIMODAL_*` never falls back.
+  - Classification: `402` → balance exhausted (Ops `critical`). Gemini `429` whose message mentions depleted prepayment credits is also balance exhausted (Google's behavior before it switched to 402). Any other `429` → rate limited (Ops `warning`). `503`/`504` → overloaded (Ops `warning`). Other `5xx`, timeouts, connection errors, and unusable replies → provider error. The same (provider, reason) alert is throttled to once per 15 minutes.
+  - Fallback order (T5.1): a `rate_limited` / `overloaded` primary is retried once on the same provider's spare model (`GEMINI_FALLBACK_MODEL`), images and audio included. Then the cross-provider fallback per the table, which applies only to text-only requests. Every extra attempt passes the budget gate again and is billed at the model that answered. `MULTIMODAL_*` never falls back across providers.
+- **Gemini thinking (T5.1)**: each Gemini model has a pinned thinking level, and its thinking headroom is added on top of the workflow's `max_output_tokens`, which sizes the answer alone. Gemini counts thinking against that cap, and the default dynamic level cut short JSON replies.
 - **DeepSeek thinking mode is disabled explicitly** on every call (`extra_body={"thinking": {"type": "disabled"}}`). DeepSeek enables thinking by default, which would add latency and billed output tokens to `TEXT_FAST_ROUTE`.
 - `src/adapters/llm/router_llm.py` (`RoutingLLM`) is the single `LLMPort` every caller uses. Per call it runs the budget gate, checks the prompt budget, picks the provider, and writes API-returned `usage` to `llm_usage_ledger` before parsing the reply. Gemini thinking tokens count as output tokens.
 - **Price table co-located with model IDs**: `src/config.py` holds per-model USD prices next to the model ID settings. A configured model ID with no price entry fails fast at startup.
@@ -149,9 +150,10 @@ Every LLM call MUST stay within a fixed prompt budget regardless of how many mon
 | `collecting` | debounce elapsed (or `group_index == group_total`) | `filtered` (image gate run) |
 | `filtered` | ≥ 1 kept image → intent-button `BotResponse` sent | `awaiting_intent` |
 | `filtered` | all images blurry → warm retake `BotResponse` sent | `done` |
-| `awaiting_intent` | intent callback → workflow completes (knowledge saved, response built) | `done` |
+| `awaiting_intent` | intent callback → workflow completes (knowledge saved, response built) | `awaiting_intent`, intent added to `completed_intents` (T5.1: another intent may still run within the TTL) |
 | `awaiting_intent` | intent callback → workflow fails (LLM error, malformed reply, budget) | `awaiting_intent` (May may tap again within the TTL) |
-| `done` | repeated callback | `done` (idempotent no-op, gentle "已經處理好囉") |
+| `awaiting_intent` | callback for an intent in `completed_intents` | unchanged (idempotent no-op, "這項已經處理好囉", also after the TTL) |
+| `done` | any callback (all-blurry batch, or finished before T5.1) | `done` (idempotent no-op, gentle "已經處理好囉") |
 
 - A new burst arriving while another batch is `awaiting_intent` opens a new batch; callbacks carry `batch_id`, so old buttons stay valid.
 - **Startup orphan recovery (idempotent)**: batches left in `collecting` / `filtered` by a restart re-run the image gate over their persisted assets and proceed per the table, sending that batch's single response once.
