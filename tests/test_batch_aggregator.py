@@ -179,8 +179,12 @@ async def test_recovery_leaves_awaiting_and_done_batches_alone(rig: Rig) -> None
     await aggregator.add(rig.image_event(asset))
     await aggregator.drain()
     batch_id = batch_id_of(rig.channel.sent[0][1])
-    await aggregator.complete(
-        tenant_id=rig.owner.tenant_id, user_id=rig.owner.user_id, batch_id=batch_id
+    await rig.store.transition(
+        tenant_id=rig.owner.tenant_id,
+        user_id=rig.owner.user_id,
+        batch_id=batch_id,
+        frm=BatchStatus.AWAITING_INTENT,
+        to=BatchStatus.DONE,
     )
     other = await rig.save(imagegen.jpeg(imagegen.sharp(901)))
     await aggregator.add(rig.image_event(other))

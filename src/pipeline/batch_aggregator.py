@@ -20,8 +20,10 @@ from typing import Any
 from src.domain.media import (
     INTENT_TTL,
     BatchStatus,
+    Intent,
     IntentSelected,
     already_done,
+    intent_already_done,
     intent_prompt,
     parse_callback,
     resend_prompt,
@@ -133,8 +135,9 @@ class BatchAggregator:
         return recovered
 
     async def handle_intent_callback(self, event: IncomingEvent) -> IntentSelected | BotResponse:
-        """Resolve a button tap. Concurrent double taps are serialized by the T3 per-user lock;
-        the batch stays awaiting_intent until the workflow calls complete()."""
+        """Resolve a button tap. Concurrent double taps are serialized by the T3 per-user lock.
+        A finished intent answers "already done" for good; any other intent may still run
+        within the TTL, because a finished workflow leaves the batch awaiting_intent."""
         parsed = parse_callback(event.callback_data or "")
         if parsed is None:
             return resend_prompt()
@@ -144,8 +147,10 @@ class BatchAggregator:
         )
         if batch is None:
             return resend_prompt()
-        if batch.status is BatchStatus.DONE:
+        if batch.status is BatchStatus.DONE:  # all blurry, or finished before T5.1
             return already_done()
+        if intent in batch.completed_intents:
+            return intent_already_done()
         if batch.status is not BatchStatus.AWAITING_INTENT:
             return resend_prompt()
         if batch.intent_expires_at is None or self._clock.now() >= batch.intent_expires_at:
@@ -155,14 +160,13 @@ class BatchAggregator:
         )
         return IntentSelected(batch_id=batch_id, intent=intent, kept_asset_ids=tuple(kept))
 
-    async def complete(self, *, tenant_id: str, user_id: str, batch_id: str) -> bool:
-        """Called by a workflow when it has finished. False if the batch was not awaiting."""
-        return await self._store.transition(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            batch_id=batch_id,
-            frm=BatchStatus.AWAITING_INTENT,
-            to=BatchStatus.DONE,
+    async def complete(
+        self, *, tenant_id: str, user_id: str, batch_id: str, intent: Intent
+    ) -> bool:
+        """Called by a workflow when it has finished. False if that intent was already
+        finished or the batch was not awaiting."""
+        return await self._store.mark_intent_done(
+            tenant_id=tenant_id, user_id=user_id, batch_id=batch_id, intent=intent
         )
 
     def _spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:

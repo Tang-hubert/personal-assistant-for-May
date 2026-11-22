@@ -1,5 +1,7 @@
+import json
+
 from src.domain import replies
-from src.domain.media import BatchStatus, Intent, already_done
+from src.domain.media import BatchStatus, Intent, intent_already_done
 from src.domain.models import TaskCapability
 from src.domain.ports import BudgetExhausted, LLMUnavailable
 from src.domain.session import ARTIFACT_KEY
@@ -48,14 +50,27 @@ async def test_completion_archives_and_opens_one_clean_followup_session(wf: Work
     assert session.recent_turns == ()
 
 
-async def test_batch_is_done_and_a_second_tap_costs_nothing(wf: WorkflowRig) -> None:
+async def test_a_second_tap_on_the_same_intent_costs_nothing(wf: WorkflowRig) -> None:
     batch_id = await wf.photo_batch()
     await wf.tap(batch_id, Intent.LECTURE)
-    assert await wf.batch_status(batch_id) is BatchStatus.DONE
+    assert await wf.finished_intents(batch_id) == (Intent.LECTURE,)
 
     again = await wf.tap(batch_id, Intent.LECTURE)
-    assert again == already_done()
+    assert again == intent_already_done()
     assert len(wf.calls("lecture_digest")) == 1
+
+
+async def test_the_same_photos_can_then_run_a_different_intent(wf: WorkflowRig) -> None:
+    """T5.1 live finding: after 寫珠寶 the batch refused 教我用手機 as already done."""
+    batch_id = await wf.photo_batch()
+    await wf.tap(batch_id, Intent.LECTURE)
+    wf.replies["ios_screenshot"] = json.dumps({"title": "看投影片", "steps": ["一", "二", "三"]})
+
+    other = await wf.tap(batch_id, Intent.IOS)
+
+    assert other is not None and other.title == "看投影片"
+    assert await wf.finished_intents(batch_id) == (Intent.LECTURE, Intent.IOS)
+    assert await wf.batch_status(batch_id) is BatchStatus.AWAITING_INTENT
 
 
 async def test_provider_failure_keeps_the_batch_tappable(wf: WorkflowRig) -> None:
@@ -70,7 +85,7 @@ async def test_provider_failure_keeps_the_batch_tappable(wf: WorkflowRig) -> Non
     wf.replies["lecture_digest"] = LECTURE_JSON
     retry = await wf.tap(batch_id, Intent.LECTURE)
     assert retry is not None and retry.title == "銀髮族防詐騙講座"
-    assert await wf.batch_status(batch_id) is BatchStatus.DONE
+    assert await wf.finished_intents(batch_id) == (Intent.LECTURE,)
 
 
 async def test_malformed_reply_is_treated_as_a_provider_failure(wf: WorkflowRig) -> None:

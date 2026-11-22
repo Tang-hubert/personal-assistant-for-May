@@ -10,6 +10,7 @@ from typing import Annotated, Protocol
 
 from pydantic import BaseModel, BeforeValidator, ValidationError
 
+from src.domain.media import Intent
 from src.domain.models import KnowledgeItem
 from src.domain.ports import LLMResult, LLMUnavailable, SessionStorePort, StoragePort
 from src.domain.session import ARTIFACT_KEY, WORKFLOW_KEY, TopicSessionState, TopicType
@@ -27,7 +28,9 @@ _FENCE = re.compile(r"^```[a-zA-Z]*\s*\n?(.*?)\n?```$", re.DOTALL)
 
 
 class BatchCompleter(Protocol):
-    async def complete(self, *, tenant_id: str, user_id: str, batch_id: str) -> bool: ...
+    async def complete(
+        self, *, tenant_id: str, user_id: str, batch_id: str, intent: Intent
+    ) -> bool: ...
 
 
 def parse_output[T: BaseModel](result: LLMResult, model: type[T], *, workflow: str) -> T:

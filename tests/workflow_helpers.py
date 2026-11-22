@@ -184,6 +184,13 @@ class WorkflowRig:
             self._event(event_type="audio", asset_ids=(asset,), audio_duration_s=duration_s)
         )
 
+    async def finished_intents(self, batch_id: str) -> tuple[Intent, ...]:
+        batch = await self.media.get_batch(
+            tenant_id=self.owner.tenant_id, user_id=self.owner.user_id, batch_id=batch_id
+        )
+        assert batch is not None
+        return batch.completed_intents
+
     async def batch_status(self, batch_id: str) -> BatchStatus:
         batch = await self.media.get_batch(
             tenant_id=self.owner.tenant_id, user_id=self.owner.user_id, batch_id=batch_id

@@ -88,6 +88,8 @@ class MediaBatchView(_Value):
     kept_count: int
     reply_address: str | None
     intent_expires_at: AwareDatetime | None
+    # Finished intents. The batch stays awaiting_intent so another intent can still run.
+    completed_intents: tuple[Intent, ...] = ()
 
 
 class IntentSelected(_Value):
@@ -120,6 +122,13 @@ def retake_prompt() -> BotResponse:
 
 def already_done() -> BotResponse:
     return BotResponse(title="已經處理好囉", bullets=("這批照片已經處理完了",))
+
+
+def intent_already_done() -> BotResponse:
+    return BotResponse(
+        title="這項已經處理好囉",
+        bullets=("上面就是剛剛整理好的結果", "想做別的 可以點其他按鈕"),
+    )
 
 
 def resend_prompt() -> BotResponse:

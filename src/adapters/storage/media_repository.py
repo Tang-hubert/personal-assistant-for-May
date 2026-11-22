@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from src.adapters.storage.orm import MediaAsset, MediaBatch, new_id
@@ -17,6 +17,7 @@ from src.domain.media import (
     ALLOWED_TRANSITIONS,
     AssetVerdict,
     BatchStatus,
+    Intent,
     MediaBatchView,
     MediaType,
 )
@@ -54,6 +55,7 @@ def _view(row: MediaBatch) -> MediaBatchView:
         kept_count=row.kept_count,
         reply_address=row.reply_address,
         intent_expires_at=row.intent_expires_at,
+        completed_intents=tuple(Intent(value) for value in row.completed_intents),
     )
 
 
@@ -209,6 +211,33 @@ class SqlMediaStore:
                     MediaBatch.status == frm.value,
                 )
                 .values(**values)
+            )
+            await session.commit()
+            return result.rowcount == 1  # type: ignore[attr-defined,no-any-return]
+
+    async def mark_intent_done(
+        self, *, tenant_id: str, user_id: str, batch_id: str, intent: Intent
+    ) -> bool:
+        """Add `intent` to an awaiting batch's finished intents in one conditional UPDATE.
+        True only for the caller that added it; a repeat or another owner's batch is False."""
+        async with self._sessions() as session:
+            result = await session.execute(
+                text(
+                    "UPDATE media_batches"
+                    " SET completed_intents = json_insert(completed_intents, '$[#]', :intent)"
+                    " WHERE id = :batch_id AND tenant_id = :tenant_id AND user_id = :user_id"
+                    " AND status = :awaiting"
+                    " AND NOT EXISTS ("
+                    "   SELECT 1 FROM json_each(media_batches.completed_intents)"
+                    "   WHERE json_each.value = :intent)"
+                ),
+                {
+                    "intent": intent.value,
+                    "batch_id": batch_id,
+                    "tenant_id": tenant_id,
+                    "user_id": user_id,
+                    "awaiting": BatchStatus.AWAITING_INTENT.value,
+                },
             )
             await session.commit()
             return result.rowcount == 1  # type: ignore[attr-defined,no-any-return]

@@ -81,7 +81,7 @@ async def test_the_box_button_saves_an_item_location_and_opens_a_clean_followup(
     assert session is not None and session.topic_type == "memory"
     assert session.state_json == {ARTIFACT_KEY: item_id, WORKFLOW_KEY: "memory_stash"}
     assert session.recent_turns == ()
-    assert await wf.batch_status(batch_id) is BatchStatus.DONE
+    assert await wf.finished_intents(batch_id) == (Intent.MEMORY,)
     assert len(wf.channel.sent) == sent_before
 
 

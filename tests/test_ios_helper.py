@@ -70,7 +70,7 @@ async def test_the_phone_button_reads_two_screenshots_and_opens_a_followup(
     (call,) = wf.calls("ios_screenshot")
     assert call.capability is TaskCapability.MULTIMODAL_IMAGE
     assert len(call.asset_ids) == 2
-    assert await wf.batch_status(batch_id) is BatchStatus.DONE
+    assert await wf.finished_intents(batch_id) == (Intent.IOS,)
     ((item_id, category, _),) = wf.knowledge_rows()
     assert category == "ios_guide"
     session = await wf.active()

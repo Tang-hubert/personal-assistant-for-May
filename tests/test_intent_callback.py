@@ -3,7 +3,14 @@ from datetime import timedelta
 import pytest
 
 from src.adapters.storage.media_repository import SqlMediaStore
-from src.domain.media import BatchStatus, Intent, IntentSelected, already_done, resend_prompt
+from src.domain.media import (
+    BatchStatus,
+    Intent,
+    IntentSelected,
+    already_done,
+    intent_already_done,
+    resend_prompt,
+)
 from src.domain.models import IncomingEvent, ReplyTarget
 from src.pipeline.batch_aggregator import BatchAggregator
 from tests import imagegen
@@ -42,22 +49,70 @@ async def test_valid_callback_inside_ttl_selects_the_intent_and_kept_assets(rig:
     assert set(result.kept_asset_ids) == set(ids)
 
 
-async def test_repeated_callback_on_a_done_batch_is_a_stable_no_op(rig: Rig) -> None:
+def _scope(rig: Rig, batch_id: str) -> dict[str, str]:
+    return {"tenant_id": rig.owner.tenant_id, "user_id": rig.owner.user_id, "batch_id": batch_id}
+
+
+async def test_a_finished_intent_leaves_the_batch_open_for_another_intent(rig: Rig) -> None:
+    aggregator, batch_id, ids = await _awaiting_batch(rig)
+    assert await aggregator.complete(**_scope(rig, batch_id), intent=Intent.SALES)
+
+    other = await aggregator.handle_intent_callback(rig.callback_event(batch_id, Intent.IOS))
+
+    assert isinstance(other, IntentSelected) and other.intent is Intent.IOS
+    assert set(other.kept_asset_ids) == set(ids)
+    assert await _status(rig, batch_id) is BatchStatus.AWAITING_INTENT
+
+
+async def test_tapping_a_finished_intent_again_is_a_stable_no_op(rig: Rig) -> None:
     aggregator, batch_id, _ = await _awaiting_batch(rig)
-    assert await aggregator.complete(
-        tenant_id=rig.owner.tenant_id, user_id=rig.owner.user_id, batch_id=batch_id
+    assert await aggregator.complete(**_scope(rig, batch_id), intent=Intent.SALES)
+
+    first = await aggregator.handle_intent_callback(rig.callback_event(batch_id, Intent.SALES))
+    second = await aggregator.handle_intent_callback(rig.callback_event(batch_id, Intent.SALES))
+    assert first == second == intent_already_done()
+
+
+async def test_complete_twice_for_one_intent_reports_the_second_as_a_no_op(rig: Rig) -> None:
+    aggregator, batch_id, _ = await _awaiting_batch(rig)
+    scope = _scope(rig, batch_id)
+    assert await aggregator.complete(**scope, intent=Intent.SALES) is True
+    assert await aggregator.complete(**scope, intent=Intent.SALES) is False
+    assert await aggregator.complete(**scope, intent=Intent.MEMORY) is True
+
+
+async def test_after_the_ttl_a_finished_intent_stays_done_and_a_new_one_asks_to_resend(
+    rig: Rig,
+) -> None:
+    aggregator, batch_id, _ = await _awaiting_batch(rig)
+    assert await aggregator.complete(**_scope(rig, batch_id), intent=Intent.SALES)
+    rig.clock.instant += timedelta(minutes=15)
+
+    done = await aggregator.handle_intent_callback(rig.callback_event(batch_id, Intent.SALES))
+    fresh = await aggregator.handle_intent_callback(rig.callback_event(batch_id, Intent.IOS))
+    assert done == intent_already_done()
+    assert fresh == resend_prompt()
+
+
+async def test_a_batch_finished_before_t5_1_still_answers_already_done(rig: Rig) -> None:
+    aggregator, batch_id, _ = await _awaiting_batch(rig)
+    assert await rig.store.transition(
+        **_scope(rig, batch_id), frm=BatchStatus.AWAITING_INTENT, to=BatchStatus.DONE
     )
-    first = await aggregator.handle_intent_callback(rig.callback_event(batch_id))
-    second = await aggregator.handle_intent_callback(rig.callback_event(batch_id))
-    assert first == second == already_done()
-    assert await _status(rig, batch_id) is BatchStatus.DONE
+    tapped = await aggregator.handle_intent_callback(rig.callback_event(batch_id, Intent.IOS))
+    assert tapped == already_done()
 
 
-async def test_complete_twice_reports_the_second_as_a_no_op(rig: Rig) -> None:
-    aggregator, batch_id, _ = await _awaiting_batch(rig)
-    scope = {"tenant_id": rig.owner.tenant_id, "user_id": rig.owner.user_id, "batch_id": batch_id}
-    assert await aggregator.complete(**scope) is True
-    assert await aggregator.complete(**scope) is False
+async def test_another_owner_cannot_mark_an_intent_done(rig: Rig, other_owner: Owner) -> None:
+    _, batch_id, _ = await _awaiting_batch(rig)
+    assert not await rig.store.mark_intent_done(
+        tenant_id=other_owner.tenant_id,
+        user_id=other_owner.user_id,
+        batch_id=batch_id,
+        intent=Intent.SALES,
+    )
+    batch = await rig.store.get_batch(**_scope(rig, batch_id))
+    assert batch is not None and batch.completed_intents == ()
 
 
 async def test_callback_is_accepted_at_14_59_and_refused_at_15_00(rig: Rig) -> None:

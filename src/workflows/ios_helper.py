@@ -143,7 +143,10 @@ class IosHelper:
             artifact_id=artifact_id,
         )
         await self._batches.complete(
-            tenant_id=tenant_id, user_id=user_id, batch_id=selected.batch_id
+            tenant_id=tenant_id,
+            user_id=user_id,
+            batch_id=selected.batch_id,
+            intent=selected.intent,
         )
         hinted = (*steps[:-1], f"{steps[-1]}\n{SCREENSHOT_HINT}")
         return guide_response(out.title, hinted)

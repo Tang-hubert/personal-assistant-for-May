@@ -132,7 +132,10 @@ class LectureDigest:
             artifact_id=artifact_id,
         )
         await self._batches.complete(
-            tenant_id=tenant_id, user_id=user_id, batch_id=selected.batch_id
+            tenant_id=tenant_id,
+            user_id=user_id,
+            batch_id=selected.batch_id,
+            intent=selected.intent,
         )
         return response
 

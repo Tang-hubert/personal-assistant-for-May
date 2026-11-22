@@ -17,7 +17,7 @@ from src.domain.budget import (
     PromptParts,
     multimodal_estimate,
 )
-from src.domain.media import AssetVerdict, BatchStatus, MediaBatchView, MediaType
+from src.domain.media import AssetVerdict, BatchStatus, Intent, MediaBatchView, MediaType
 from src.domain.models import (
     BotResponse,
     Channel,
@@ -255,6 +255,12 @@ class MediaStorePort(Protocol):
         batch_id: str,
         verdicts: Sequence[AssetVerdict],
     ) -> None: ...
+
+    async def mark_intent_done(
+        self, *, tenant_id: str, user_id: str, batch_id: str, intent: Intent
+    ) -> bool:
+        """Record a finished intent on an awaiting batch; True only the first time."""
+        ...
 
     async def get_batch(
         self, *, tenant_id: str, user_id: str, batch_id: str

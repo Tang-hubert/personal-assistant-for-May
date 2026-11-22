@@ -146,6 +146,7 @@ class MediaBatch(Base):
     reply_address: Mapped[str | None] = mapped_column(Text)
     intent_expires_at: Mapped[datetime | None]
     created_at: Mapped[datetime]
+    completed_intents: Mapped[list[Any]] = mapped_column(default=list, server_default="[]")
 
 
 class MediaAsset(Base):
