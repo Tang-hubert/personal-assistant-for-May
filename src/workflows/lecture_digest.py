@@ -3,7 +3,9 @@ Layer 1), then a clean Layer-2 session for follow-up questions."""
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Annotated
+
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from src.domain import replies
 from src.domain.budget import SLOT_RETRIEVED, PromptParts, truncate_to_tokens
@@ -17,10 +19,12 @@ from src.workflows.common import (
     BULLET_MAX_CHARS,
     TW_STYLE,
     BatchCompleter,
+    ClippedTitle,
     clip,
     open_followup,
     parse_output,
     session_artifact,
+    text_list,
 )
 
 WORKFLOW = "lecture_digest"
@@ -40,11 +44,14 @@ FOLLOWUP_SYSTEM = TW_STYLE + (
 )
 
 
+_Bullets = Annotated[tuple[str, ...], BeforeValidator(text_list(3, BULLET_MAX_CHARS))]
+
+
 class LectureOut(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    title: str = Field(min_length=1)
-    takeaways: tuple[str, ...] = Field(min_length=1)
+    title: ClippedTitle = Field(min_length=1)
+    takeaways: _Bullets = Field(min_length=1)
     purpose: str = ""
     reminder: str = ""
 
@@ -52,7 +59,7 @@ class LectureOut(BaseModel):
 class FollowupOut(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    bullets: tuple[str, ...] = Field(min_length=1)
+    bullets: _Bullets = Field(min_length=1)
 
 
 def _content(out: LectureOut) -> str:
@@ -90,7 +97,7 @@ class LectureDigest:
                 json_output=True,
             )
         )
-        out = parse_output(result, LectureOut)
+        out = parse_output(result, LectureOut, workflow=WORKFLOW)
         title = clip(out.title, 30)
         artifact_id = await self._storage.save_knowledge(
             tenant_id=tenant_id,
@@ -154,7 +161,8 @@ class LectureDigest:
             )
         )
         bullets = tuple(
-            clip(b, BULLET_MAX_CHARS) for b in parse_output(result, FollowupOut).bullets[:3]
+            clip(b, BULLET_MAX_CHARS)
+            for b in parse_output(result, FollowupOut, workflow=FOLLOWUP_WORKFLOW).bullets[:3]
         )
         return HandlerReply(
             text="\n".join(bullets),

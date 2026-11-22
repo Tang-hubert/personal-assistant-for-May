@@ -2,19 +2,22 @@ import json
 import logging
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from telegram.error import NetworkError, TimedOut
 from telegram.request import HTTPXRequest
 
 from src.adapters.storage.engine import db_path_for
 from src.adapters.storage.migrate import upgrade_to_head
+from src.adapters.telegram.processor import PerUserUpdateProcessor
 from src.bootstrap import Runtime, build_runtime, start, stop
 from src.config import Settings
 from src.domain import replies
 from src.domain.media import Intent
 from src.domain.ports import LLMRequest
-from src.main import build_application, configure_logging, main
+from src.main import build_application, configure_logging, gemini_spare_model, main, on_error
 from tests import imagegen
 from tests.fakes import FakeLLM, FakeNotifier, FrozenClock
 from tests.telegram_helpers import (
@@ -250,9 +253,54 @@ async def test_updates_are_handled_one_at_a_time_in_telegram_order(
 
     app = build_application(settings)
 
-    # A typed correction must not overtake the voice note still downloading before it.
-    assert app.concurrent_updates == 1
+    # A typed correction must not overtake the voice note still downloading before it, yet a
+    # tap must be answered at once: per-user order, across users concurrent
+    # (tests/test_update_processor.py proves both).
+    assert isinstance(app.update_processor, PerUserUpdateProcessor)
+    assert app.concurrent_updates > 1
+    assert app.error_handlers
     await app.post_shutdown(app)
+
+
+@pytest.mark.parametrize(
+    ("fallback", "expected"),
+    [(None, None), ("gemini-3.8-flash", None), ("gemini-3.5-flash-lite", "gemini-3.5-flash-lite")],
+)
+def test_the_gemini_spare_is_used_only_when_it_differs_from_the_main_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fallback: str | None, expected: str | None
+) -> None:
+    _set_env(monkeypatch, tmp_path, str(MAY_ID))
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.8-flash")
+    if fallback is not None:
+        monkeypatch.setenv("GEMINI_FALLBACK_MODEL", fallback)
+    else:
+        monkeypatch.delenv("GEMINI_FALLBACK_MODEL", raising=False)
+    assert gemini_spare_model(Settings()) == expected
+
+
+@pytest.mark.parametrize("error", [NetworkError("Bad Gateway"), TimedOut()])
+async def test_a_telegram_network_error_is_one_warning_line(
+    caplog: pytest.LogCaptureFixture, error: Exception
+) -> None:
+    caplog.set_level(logging.INFO)
+    await on_error(None, SimpleNamespace(error=error))  # type: ignore[arg-type]
+
+    (record,) = caplog.records
+    assert record.levelno == logging.WARNING
+    assert record.exc_info is None
+    assert "telegram network" in record.getMessage()
+
+
+async def test_any_other_error_keeps_its_traceback(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO)
+    try:
+        raise KeyError("boom")
+    except KeyError as err:
+        await on_error(None, SimpleNamespace(error=err))  # type: ignore[arg-type]
+
+    (record,) = caplog.records
+    assert record.levelno == logging.ERROR
+    assert record.exc_info is not None
 
 
 async def _unauthorized(*_args: object, **_kwargs: object) -> tuple[int, bytes]:

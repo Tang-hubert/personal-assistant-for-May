@@ -28,6 +28,7 @@ class Rig:
         self.notifier = FakeNotifier()
         self.gemini = FakeLLM(provider="gemini", model="gemini-3.8-flash")
         self.deepseek = FakeLLM(provider="deepseek", model="deepseek-flash")
+        self.spare: FakeLLM | None = None
         self.build()
 
     def build(self) -> None:
@@ -36,7 +37,13 @@ class Rig:
             {"gemini": self.gemini, "deepseek": self.deepseek},
             self.notifier,
             self.clock,
+            spares={"gemini": self.spare} if self.spare is not None else {},
         )
+
+    def with_spare(self) -> FakeLLM:
+        self.spare = FakeLLM(provider="gemini", model="gemini-3.5-flash-lite")
+        self.build()
+        return self.spare
 
     def request(self, capability: TaskCapability, **overrides: object) -> LLMRequest:
         return request(
@@ -205,3 +212,75 @@ async def test_billed_malformed_reply_is_recorded_then_alerted_and_falls_back(ri
         ("deepseek", "deepseek-flash", 40, 7, pytest.approx(0.000021)),
         ("gemini", "gemini-3.8-flash", 1000, 100, pytest.approx(0.001125)),
     ]
+
+
+@pytest.mark.parametrize("reason", ["overloaded", "rate_limited"])
+async def test_a_busy_gemini_model_hands_an_image_request_to_its_spare_model(
+    rig: Rig, reason: str
+) -> None:
+    spare = rig.with_spare()
+    rig.gemini.respond = lambda req: LLMUnavailable(reason, "gemini", detail="http 503")  # type: ignore[arg-type]
+
+    result = await rig.llm.generate(
+        rig.request(TaskCapability.MULTIMODAL_IMAGE, asset_ids=("i1", "i2"))
+    )
+
+    assert result.model == "gemini-3.5-flash-lite"
+    assert spare.calls[0].asset_ids == ("i1", "i2")
+    assert rig.deepseek.calls == []
+    assert [row[:2] for row in rig.ledger_rows()] == [("gemini", "gemini-3.5-flash-lite")]
+
+
+async def test_a_provider_error_does_not_try_the_spare(rig: Rig) -> None:
+    spare = rig.with_spare()
+    rig.gemini.respond = lambda req: LLMUnavailable("provider_error", "gemini")
+
+    with pytest.raises(LLMUnavailable):
+        await rig.llm.generate(rig.request(TaskCapability.MULTIMODAL_IMAGE, asset_ids=("i1",)))
+    assert spare.calls == []
+
+
+async def test_a_failed_spare_still_lets_text_fall_back_to_deepseek(rig: Rig) -> None:
+    spare = rig.with_spare()
+    rig.gemini.respond = lambda req: LLMUnavailable("overloaded", "gemini")
+    spare.respond = lambda req: LLMUnavailable("overloaded", "gemini")
+
+    result = await rig.llm.generate(rig.request(TaskCapability.COPYWRITING_TW))
+
+    assert result.provider == "deepseek"
+    assert len(spare.calls) == 1
+
+
+async def test_the_spare_is_gated_by_the_budget_again(rig: Rig) -> None:
+    spare = rig.with_spare()
+
+    class ExhaustingGemini(FakeLLM):
+        async def generate(self, request: LLMRequest) -> LLMResult:
+            self.calls.append(request)
+            await rig.spend_whole_budget()
+            raise LLMUnavailable("overloaded", "gemini")
+
+    rig.gemini = ExhaustingGemini(provider="gemini", model="gemini-3.8-flash")
+    rig.build()
+
+    with pytest.raises(BudgetExhausted):
+        await rig.llm.generate(rig.request(TaskCapability.MULTIMODAL_IMAGE, asset_ids=("i1",)))
+    assert spare.calls == []
+
+
+async def test_each_call_logs_workflow_model_and_tokens_without_the_prompt(
+    rig: Rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig.gemini.respond = lambda req: LLMUnavailable("overloaded", "gemini", detail="http 503")
+
+    with caplog.at_level("INFO", logger="src.adapters.llm.router_llm"):
+        await rig.llm.generate(
+            rig.request(TaskCapability.COPYWRITING_TW, workflow_name="ios_helper")
+        )
+
+    assert "llm failed workflow=ios_helper provider=gemini reason=overloaded detail=http 503" in (
+        caplog.text
+    )
+    assert "llm ok workflow=ios_helper provider=deepseek model=deepseek-flash" in caplog.text
+    assert "in=1000 out=100" in caplog.text
+    assert "幫我改親切一點" not in caplog.text

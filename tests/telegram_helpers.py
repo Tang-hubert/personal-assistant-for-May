@@ -131,7 +131,11 @@ def video_update() -> Update:
 
 
 def callback_update(
-    data: str = "s:finish", *, with_message: bool = True, user_id: int = MAY_ID
+    data: str = "s:finish",
+    *,
+    with_message: bool = True,
+    user_id: int = MAY_ID,
+    update_id: int | None = None,
 ) -> Update:
     user = User(id=user_id, first_name="May", is_bot=False)
     message = (
@@ -147,4 +151,6 @@ def callback_update(
     query = CallbackQuery(
         id=f"cq-{next(_ids)}", from_user=user, chat_instance="ci", message=message, data=data
     )
-    return Update(update_id=next(_ids), callback_query=query)
+    return Update(
+        update_id=update_id if update_id is not None else next(_ids), callback_query=query
+    )

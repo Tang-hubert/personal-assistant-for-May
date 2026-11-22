@@ -3,7 +3,9 @@ is saved as an ios_guide item, so a follow-up sees the last guide as context, no
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Annotated
+
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from src.domain import replies
 from src.domain.budget import SLOT_RETRIEVED, PromptParts, truncate_to_tokens
@@ -16,10 +18,12 @@ from src.workflows.common import (
     BULLET_MAX_CHARS,
     TW_STYLE,
     BatchCompleter,
+    ClippedTitle,
     clip,
     open_followup,
     parse_output,
     session_artifact,
+    text_list,
 )
 
 WORKFLOW = "ios_helper"
@@ -45,8 +49,10 @@ SCREENSHOT_SYSTEM = (
 class GuideOut(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    title: str = Field(min_length=1)
-    steps: tuple[str, ...] = Field(min_length=STEPS)
+    title: ClippedTitle = Field(min_length=1)
+    steps: Annotated[tuple[str, ...], BeforeValidator(text_list(STEPS, BULLET_MAX_CHARS))] = Field(
+        min_length=1
+    )
 
 
 def _steps(out: GuideOut) -> tuple[str, ...]:
@@ -99,7 +105,7 @@ class IosHelper:
                 json_output=True,
             )
         )
-        out = parse_output(result, GuideOut)
+        out = parse_output(result, GuideOut, workflow=WORKFLOW)
         steps = _steps(out)
         artifact_id = await self._save(tenant_id, user_id, out.title, steps, None)
         return HandlerReply(
@@ -123,7 +129,7 @@ class IosHelper:
                 json_output=True,
             )
         )
-        out = parse_output(result, GuideOut)
+        out = parse_output(result, GuideOut, workflow=SCREENSHOT_WORKFLOW)
         steps = _steps(out)
         artifact_id = await self._save(
             tenant_id, user_id, out.title, steps, assets[0] if assets else None

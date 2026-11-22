@@ -479,3 +479,33 @@ async def test_handler_artifact_id_is_committed_into_state_json(rig: Rig) -> Non
     assert after is not None
     assert after.state_json == {"last_artifact_id": "new", "workflow": "sales_copy"}
     assert len(after.recent_turns) == 2
+
+
+async def test_the_route_is_logged_without_the_users_words(
+    rig: Rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO", logger="src.domain.router")
+    rig.route_reply = json.dumps({"route": "sales", "topic_shift": False})
+
+    await rig.router.handle(rig.text("幫我寫珍珠文案"))
+
+    assert "route=sales topic_shift=False session=new" in caplog.text
+    assert "珍珠" not in caplog.text
+
+
+async def test_a_busy_reply_says_why_in_the_log(
+    rig: Rig, media_store: SqlMediaStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO", logger="src.domain.router")
+    _real_providers(rig, media_store, html_200, truncated_json_200)
+
+    assert await rig.router.handle(rig.text("翡翠放哪")) == replies.busy_message()
+    assert "busy reply event=text provider=gemini reason=provider_error" in caplog.text
+
+
+async def test_the_rest_message_is_logged(rig: Rig, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("INFO", logger="src.domain.router")
+    await rig.spend_whole_budget()
+
+    assert await rig.router.handle(rig.text("翡翠放哪")) == replies.rest_message()
+    assert "budget exhausted" in caplog.text

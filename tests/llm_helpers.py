@@ -41,14 +41,16 @@ def deepseek_on(handler: Handler, *, strict: bool = False) -> DeepSeekDirectAdap
     return DeepSeekDirectAdapter(client, DEEPSEEK_MODEL)
 
 
-def gemini_on(handler: Handler, media: MediaStorePort) -> GeminiDirectAdapter:
+def gemini_on(
+    handler: Handler, media: MediaStorePort, *, model: str = GEMINI_MODEL
+) -> GeminiDirectAdapter:
     client = genai.Client(
         api_key="test",
         http_options=types.HttpOptions(
             async_client_args={"transport": httpx.MockTransport(handler)}
         ),
     )
-    return GeminiDirectAdapter(client, GEMINI_MODEL, media)
+    return GeminiDirectAdapter(client, model, media)
 
 
 def request(

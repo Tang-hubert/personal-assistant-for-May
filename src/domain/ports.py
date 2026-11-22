@@ -32,7 +32,8 @@ from src.domain.models import (
 from src.domain.session import TopicSessionState, TopicType
 
 Provider = Literal["gemini", "deepseek"]
-UnavailableReason = Literal["balance_exhausted", "rate_limited", "provider_error"]
+# overloaded = HTTP 503/504: the model is busy, so a spare model of the same provider may answer.
+UnavailableReason = Literal["balance_exhausted", "rate_limited", "overloaded", "provider_error"]
 
 
 class Clock(Protocol):
@@ -91,6 +92,7 @@ class LLMResult(BaseModel):
     model: str
     prompt_tokens: int
     completion_tokens: int
+    finish_reason: str | None = None  # e.g. STOP / MAX_TOKENS, when the provider reports one
 
 
 class LLMPort(Protocol):
@@ -108,12 +110,19 @@ class LLMUnavailable(Exception):
     reply). `billed` is the usage of a reply the provider charged for but that was unusable."""
 
     def __init__(
-        self, reason: UnavailableReason, provider: Provider, billed: LLMResult | None = None
+        self,
+        reason: UnavailableReason,
+        provider: Provider,
+        billed: LLMResult | None = None,
+        *,
+        detail: str | None = None,
     ) -> None:
-        super().__init__(f"{provider}: {reason}")
+        super().__init__(f"{provider}: {reason}" + (f" ({detail})" if detail else ""))
         self.reason: UnavailableReason = reason
         self.provider: Provider = provider
         self.billed = billed
+        # A log-safe hint such as "http 503" or "finish=MAX_TOKENS"; never prompt or reply text.
+        self.detail = detail
 
 
 class BudgetStatus(StrEnum):

@@ -57,6 +57,7 @@ def build_runtime(
     clock: Clock,
     providers: ProviderFactory,
     *,
+    spares: ProviderFactory | None = None,
     notifier: OpsNotifierPort | None = None,
 ) -> Runtime:
     engine = create_engine(db_path_for(settings.DATA_DIR))
@@ -66,7 +67,9 @@ def build_runtime(
     media = SqlMediaStore(engine, clock, settings.DATA_DIR)
     sessions = SqlSessionStore(engine, clock)
     finops = FinOpsGuardian(SqlLedger(engine, clock), ops, clock)
-    llm = RoutingLLM(finops, providers(media), ops, clock)
+    llm = RoutingLLM(
+        finops, providers(media), ops, clock, spares=spares(media) if spares is not None else None
+    )
     channel = TelegramChannel(bot_api, storage, media)
     aggregator = BatchAggregator(
         media,

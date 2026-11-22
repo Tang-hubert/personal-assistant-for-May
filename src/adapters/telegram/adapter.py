@@ -54,6 +54,18 @@ def _frames(err: BaseException) -> str:
     return "".join(traceback.format_tb(err.__traceback__))
 
 
+def _kind(envelope: Envelope) -> str:
+    match envelope.content:
+        case Text():
+            return "text"
+        case Callback():
+            return "callback"
+        case Media(kind=kind):
+            return kind
+        case _:
+            return "unsupported"
+
+
 def to_jpeg(data: bytes) -> bytes:
     with Image.open(io.BytesIO(data)) as image:
         out = io.BytesIO()
@@ -129,6 +141,22 @@ class TelegramAdapter:
         self._dedup = dedup or RecentEventIds()
         self._typing_interval_s = typing_interval_s
 
+    async def acknowledge(self, update: object) -> None:
+        """Stop an allowlisted tap's spinner. PerUserUpdateProcessor calls this before the tap
+        waits behind its user's earlier updates; handle_update never answers a tap itself."""
+        envelope = parse_update(update) if isinstance(update, Update) else None
+        if (
+            envelope is None
+            or envelope.callback_query_id is None
+            or envelope.user_id not in self._allowed
+        ):
+            return
+        try:
+            await self._bot.answer_callback_query(envelope.callback_query_id)
+        except Exception as err:
+            # A tap older than Telegram's answer window still deserves its reply.
+            logger.warning("callback answer failed: %s", type(err).__name__)
+
     async def handle_update(self, update: Update) -> None:
         envelope = parse_update(update)
         if envelope is None:
@@ -140,12 +168,7 @@ class TelegramAdapter:
             return
         if not self._dedup.claim(envelope.event_id):
             return
-        if envelope.callback_query_id is not None:
-            try:
-                await self._bot.answer_callback_query(envelope.callback_query_id)
-            except Exception as err:
-                # A tap older than Telegram's answer window still deserves its reply.
-                logger.warning("callback answer failed: %s", type(err).__name__)
+        logger.info("update %s kind=%s", envelope.event_id, _kind(envelope))
         target = ReplyTarget(address=str(envelope.chat_id))
         try:
             response = await self._respond(envelope, target)

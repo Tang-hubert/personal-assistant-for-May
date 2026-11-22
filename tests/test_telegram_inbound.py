@@ -65,6 +65,8 @@ class Edge:
     storage: CountingStorage
 
     async def feed(self, update: Update) -> None:
+        # As PerUserUpdateProcessor does: acknowledge first, then handle.
+        await self.adapter.acknowledge(update)
         await self.adapter.handle_update(update)
 
 
@@ -135,6 +137,32 @@ async def test_a_callback_is_answered_and_keyed_by_its_query_id(edge: Edge) -> N
     assert event.event_id == f"tg:cb:{update.callback_query.id}"
     assert event.event_type == "action_callback" and event.callback_data == "s:finish"
     assert [sent.chat_id for sent in edge.bot.sent] == [MAY_ID]
+
+
+async def test_handling_alone_never_answers_a_tap(edge: Edge) -> None:
+    await edge.adapter.handle_update(callback_update("s:finish"))
+    assert edge.bot.answered == []
+    assert len(edge.router.events) == 1
+
+
+async def test_acknowledge_answers_only_an_allowlisted_tap(edge: Edge) -> None:
+    tap = callback_update("s:finish")
+    assert tap.callback_query is not None
+    await edge.adapter.acknowledge(text_update())
+    await edge.adapter.acknowledge(callback_update(user_id=STRANGER_ID))
+    await edge.adapter.acknowledge(tap)
+
+    assert edge.bot.answered == [tap.callback_query.id]
+    assert edge.router.events == []
+
+
+async def test_each_update_logs_its_kind_but_never_its_text(
+    edge: Edge, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO")
+    await edge.feed(text_update("我的翡翠放在衣櫃", update_id=77))
+    assert "update tg:u:77 kind=text" in caplog.text
+    assert "翡翠" not in caplog.text
 
 
 async def test_a_callback_on_a_message_too_old_to_include_replies_to_the_user(

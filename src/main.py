@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 
 from telegram import Update
-from telegram.error import InvalidToken
+from telegram.error import InvalidToken, NetworkError
 from telegram.ext import Application, ApplicationBuilder, ContextTypes, TypeHandler
 
 from src.adapters.clock import SystemClock
@@ -15,6 +15,7 @@ from src.adapters.llm.gemini_adapter import GeminiDirectAdapter, create_gemini_c
 from src.adapters.storage.engine import db_path_for
 from src.adapters.storage.migrate import upgrade_to_head
 from src.adapters.telegram.bot_api import PtbBotApi
+from src.adapters.telegram.processor import PerUserUpdateProcessor
 from src.bootstrap import build_runtime, drain, start, stop
 from src.config import Settings
 from src.domain.ports import LLMPort, MediaStorePort, Provider
@@ -50,11 +51,27 @@ class RedactSecrets(logging.Filter):
 def configure_logging(*secrets: str) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     # httpx logs every request URL at INFO, and a Bot API URL contains the bot token.
-    for name in ("httpx", "httpx2"):
+    # google_genai logs "AFC is enabled" at INFO on every call.
+    for name in ("httpx", "httpx2", "google_genai"):
         logging.getLogger(name).setLevel(logging.WARNING)
     redact = RedactSecrets(secrets)
     for handler in logging.getLogger().handlers:
         handler.addFilter(redact)
+
+
+async def on_error(_update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A Telegram hiccup (Bad Gateway, timeout) while polling is one line; PTB retries it.
+    Without a handler PTB prints "No error handlers are registered" and a full traceback."""
+    err = context.error
+    if isinstance(err, NetworkError):  # TimedOut is a NetworkError
+        log.warning("telegram network: %s: %s", type(err).__name__, err)
+        return
+    log.error("unhandled telegram error", exc_info=err)
+
+
+def gemini_spare_model(settings: Settings) -> str | None:
+    spare = settings.GEMINI_FALLBACK_MODEL
+    return spare if spare is not None and spare != settings.GEMINI_MODEL else None
 
 
 def load_settings() -> Settings:
@@ -74,6 +91,13 @@ def build_application(settings: Settings) -> Application:  # type: ignore[type-a
             "deepseek": DeepSeekDirectAdapter(deepseek_client, settings.DEEPSEEK_MODEL),
         }
 
+    spare_model = gemini_spare_model(settings)
+
+    def spares(media: MediaStorePort) -> dict[Provider, LLMPort]:
+        if spare_model is None:
+            return {}
+        return {"gemini": GeminiDirectAdapter(gemini_client, spare_model, media)}
+
     async def on_start(_app: Application) -> None:  # type: ignore[type-arg]
         await start(runtime)
 
@@ -88,16 +112,23 @@ def build_application(settings: Settings) -> Application:  # type: ignore[type-a
     async def on_update(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         await runtime.adapter.handle_update(update)
 
+    async def acknowledge(update: object) -> None:
+        await runtime.adapter.acknowledge(update)
+
     application = (
         ApplicationBuilder()
         .token(settings.TELEGRAM_BOT_TOKEN.get_secret_value())
+        .concurrent_updates(PerUserUpdateProcessor(acknowledge))
         .post_init(on_start)
         .post_stop(on_stop)
         .post_shutdown(on_shutdown)
         .build()
     )
-    runtime = build_runtime(settings, PtbBotApi(application.bot), SystemClock(), providers)
+    runtime = build_runtime(
+        settings, PtbBotApi(application.bot), SystemClock(), providers, spares=spares
+    )
     application.add_handler(TypeHandler(Update, on_update))
+    application.add_error_handler(on_error)
     return application
 
 

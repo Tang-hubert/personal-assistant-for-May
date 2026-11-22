@@ -46,10 +46,21 @@ def test_settings_read_comma_separated_ids_from_environment(
     assert Settings(_env_file=None, **fields).TELEGRAM_ALLOWED_USER_IDS == (333, 444)
 
 
-@pytest.mark.parametrize("field", ["GEMINI_MODEL", "DEEPSEEK_MODEL"])
+@pytest.mark.parametrize("field", ["GEMINI_MODEL", "DEEPSEEK_MODEL", "GEMINI_FALLBACK_MODEL"])
 def test_unknown_model_fails_fast(field: str) -> None:
     with pytest.raises(ValidationError, match="no price entry"):
         _settings(**{field: "mystery-model-9"})
+
+
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_the_gemini_fallback_model_is_optional(value: str | None) -> None:
+    overrides = {} if value is None else {"GEMINI_FALLBACK_MODEL": value}
+    assert _settings(**overrides).GEMINI_FALLBACK_MODEL is None
+
+
+def test_a_priced_gemini_fallback_model_is_accepted() -> None:
+    settings = _settings(GEMINI_FALLBACK_MODEL="gemini-3.5-flash-lite")
+    assert settings.GEMINI_FALLBACK_MODEL == "gemini-3.5-flash-lite"
 
 
 def test_gemini_promo_price_switches_to_standard_on_2027_01_01() -> None:

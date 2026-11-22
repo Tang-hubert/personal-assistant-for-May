@@ -46,5 +46,5 @@ class VoiceTranscriber:
                 json_output=True,
             )
         )
-        out = parse_output(result, TranscriptOut)
+        out = parse_output(result, TranscriptOut, workflow=WORKFLOW)
         return out.transcript.strip() if out.audible else ""

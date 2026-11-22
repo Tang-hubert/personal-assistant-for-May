@@ -155,7 +155,7 @@ class MemoryStash:
                 json_output=True,
             )
         )
-        out = parse_output(result, StashOut)
+        out = parse_output(result, StashOut, workflow=WORKFLOW)
         artifact_id = await self._save(
             tenant_id, user_id, out.item, out.location, out.keywords, assets[0] if assets else None
         )
@@ -195,7 +195,7 @@ class MemoryStash:
                 json_output=True,
             )
         )
-        action = parse_output(result, MemoryAction)
+        action = parse_output(result, MemoryAction, workflow=PARSE_WORKFLOW)
         if action.action == "query":
             return await self._query(ctx, action)
         if action.action == "update" and current is not None and _same_item(action.item, current):
@@ -252,7 +252,7 @@ class MemoryStash:
                 json_output=True,
             )
         )
-        out = parse_output(result, AnswerOut)
+        out = parse_output(result, AnswerOut, workflow=ANSWER_WORKFLOW)
         bullets = tuple(clip(b, BULLET_MAX_CHARS) for b in out.bullets[:3])
         text = "\n".join(bullets)
         if out.pick is None or not 1 <= out.pick <= len(hits):

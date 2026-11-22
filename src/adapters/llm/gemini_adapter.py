@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 import httpx2
 from google import genai
@@ -17,9 +19,26 @@ from src.domain.ports import (
     UnavailableReason,
 )
 
-TIMEOUT_MS = 60_000
+logger = logging.getLogger(__name__)
+
+# Per attempt. One retry only: a 503/504 that survives it goes to the spare model (RoutingLLM).
+TIMEOUT_MS = 30_000
 # 402 and 429 are never retried: an empty prepaid balance does not refill within seconds.
-RETRY = types.HttpRetryOptions(attempts=3, http_status_codes=[408, 500, 502, 503, 504])
+RETRY = types.HttpRetryOptions(attempts=2, http_status_codes=[408, 500, 502, 503, 504])
+
+# Gemini counts thinking tokens against max_output_tokens. Left at the default (dynamic)
+# level, thinking used up the 400-token cap of an iOS guide and cut its JSON mid-way. Each
+# model's level is pinned, and its thinking headroom is added on top of the workflow's cap,
+# which stays the size of the answer alone.
+THINKING_LEVELS: dict[str, types.ThinkingLevel] = {
+    "gemini-3.8-flash": types.ThinkingLevel.LOW,
+    "gemini-3.5-flash-lite": types.ThinkingLevel.MINIMAL,
+}
+DEFAULT_THINKING = types.ThinkingLevel.LOW
+THINKING_HEADROOM: dict[types.ThinkingLevel, int] = {
+    types.ThinkingLevel.MINIMAL: 512,
+    types.ThinkingLevel.LOW: 1024,
+}
 
 
 def create_gemini_client(api_key: SecretStr) -> genai.Client:
@@ -30,6 +49,8 @@ def create_gemini_client(api_key: SecretStr) -> genai.Client:
 
 
 def _classify(err: errors.APIError) -> UnavailableReason:
+    if err.code in (503, 504):
+        return "overloaded"
     if err.code == 402:
         return "balance_exhausted"
     if err.code == 429:
@@ -45,6 +66,7 @@ class GeminiDirectAdapter:
         self._client = client
         self._model = model
         self._media = media
+        self._thinking = THINKING_LEVELS.get(model, DEFAULT_THINKING)
 
     async def generate(self, request: LLMRequest) -> LLMResult:
         parts = request.prompt
@@ -71,7 +93,8 @@ class GeminiDirectAdapter:
         )
         config = types.GenerateContentConfig(
             system_instruction=parts.system_text(),
-            max_output_tokens=request.max_output_tokens,
+            max_output_tokens=request.max_output_tokens + THINKING_HEADROOM[self._thinking],
+            thinking_config=types.ThinkingConfig(thinking_level=self._thinking),
             # Fixed at 560 tokens per image; the multimodal budget is computed at this rate.
             media_resolution=types.MediaResolution.MEDIA_RESOLUTION_MEDIUM,
             response_mime_type="application/json" if request.json_output else None,
@@ -83,8 +106,9 @@ class GeminiDirectAdapter:
             text = response.text or ""
             usage = response.usage_metadata
             answered = bool(response.candidates)
+            finish = response.candidates[0].finish_reason if response.candidates else None
         except errors.APIError as err:
-            raise LLMUnavailable(_classify(err), "gemini") from err
+            raise LLMUnavailable(_classify(err), "gemini", detail=f"http {err.code}") from err
         except (
             httpx.HTTPError,
             httpx2.HTTPError,
@@ -94,7 +118,7 @@ class GeminiDirectAdapter:
             KeyError,
             TypeError,
         ) as err:
-            raise LLMUnavailable("provider_error", "gemini") from err
+            raise LLMUnavailable("provider_error", "gemini", detail=type(err).__name__) from err
 
         prompt_tokens = usage.prompt_token_count if usage else None
         candidates = usage.candidates_token_count if usage else None
@@ -109,8 +133,19 @@ class GeminiDirectAdapter:
             else multimodal_estimate(parts, request.image_count, request.audio_duration_s),
             completion_tokens=(candidates if candidates is not None else estimate_tokens(text))
             + (thoughts or 0),
+            finish_reason=finish.name if finish is not None else None,
         )
         if not answered:
             # A blocked prompt comes back with no candidates, yet its input was still billed.
-            raise LLMUnavailable("provider_error", "gemini", result if usage else None)
+            raise LLMUnavailable(
+                "provider_error", "gemini", result if usage else None, detail="no candidates"
+            )
+        if result.finish_reason not in (None, "STOP"):
+            logger.warning(
+                "gemini reply not finished: model=%s finish=%s out=%s thoughts=%s",
+                self._model,
+                result.finish_reason,
+                candidates,
+                thoughts,
+            )
         return result

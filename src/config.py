@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     APP_ENV: Literal["dev", "prod", "test"] = "dev"
     GEMINI_API_KEY: SecretStr
     GEMINI_MODEL: str
+    # Spare model of the same provider, tried once when GEMINI_MODEL answers 429/503/504.
+    GEMINI_FALLBACK_MODEL: str | None = None
     DEEPSEEK_API_KEY: SecretStr
     DEEPSEEK_MODEL: str
     TELEGRAM_BOT_TOKEN: SecretStr
@@ -72,6 +74,13 @@ class Settings(BaseSettings):
     def _split_ids(cls, value: object) -> object:
         if isinstance(value, str):
             return tuple(int(part) for part in value.split(",") if part.strip())
+        return value
+
+    @field_validator("GEMINI_FALLBACK_MODEL", mode="before")
+    @classmethod
+    def _blank_means_unset(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip() or None
         return value
 
     @field_validator("DISCORD_OPS_WEBHOOK_URL", mode="before")
@@ -90,8 +99,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _models_must_be_priced(self) -> Self:
-        for field in ("GEMINI_MODEL", "DEEPSEEK_MODEL"):
+        for field in ("GEMINI_MODEL", "DEEPSEEK_MODEL", "GEMINI_FALLBACK_MODEL"):
             model = getattr(self, field)
-            if model not in MODEL_PRICES:
+            if model is not None and model not in MODEL_PRICES:
                 raise ValueError(f"{field}={model!r} has no price entry in MODEL_PRICES")
         return self

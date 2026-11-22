@@ -26,6 +26,7 @@ from src.workflows.common import (
     BLOCK_MAX_CHARS,
     TW_STYLE,
     BatchCompleter,
+    ClippedTitle,
     clip,
     open_followup,
     parse_output,
@@ -51,7 +52,7 @@ class SalesOut(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     category: Literal["jewelry", "product"] = "jewelry"
-    title: str = Field(min_length=1)
+    title: ClippedTitle = Field(min_length=1)
     version_a: str = Field(min_length=1)
     version_b: str | None = None
 
@@ -130,7 +131,7 @@ class SalesCopy:
                 json_output=True,
             )
         )
-        out = parse_output(result, SalesOut)
+        out = parse_output(result, SalesOut, workflow=WORKFLOW)
         track = dual_track(out)
         artifact_id = await self._save(
             tenant_id, user_id, out.category, out.title, track, assets[0] if assets else None
@@ -173,7 +174,7 @@ class SalesCopy:
                 json_output=True,
             )
         )
-        out = parse_output(result, SalesOut)
+        out = parse_output(result, SalesOut, workflow=FOLLOWUP_WORKFLOW)
         track = dual_track(out)
         artifact_id = await self._save(
             tenant_id,

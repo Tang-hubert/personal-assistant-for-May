@@ -13,6 +13,7 @@ index is what guarantees a single active session.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import defaultdict
 from collections.abc import Mapping
 from typing import Protocol
@@ -44,6 +45,8 @@ from src.domain.session import (
     is_idle_expired,
     parse_slots,
 )
+
+logger = logging.getLogger(__name__)
 
 ROUTE_WORKFLOW = "route"
 EXTRACT_WORKFLOW = "slot_extract"
@@ -149,8 +152,16 @@ class Router:
             try:
                 return await self._dispatch(event)
             except BudgetExhausted:
+                logger.info("budget exhausted: rest reply event=%s", event.event_type)
                 return replies.rest_message()
-            except LLMUnavailable:
+            except LLMUnavailable as err:
+                logger.warning(
+                    "busy reply event=%s provider=%s reason=%s detail=%s",
+                    event.event_type,
+                    err.provider,
+                    err.reason,
+                    err.detail,
+                )
                 return replies.busy_message()
 
     async def _dispatch(self, event: IncomingEvent) -> BotResponse | None:
@@ -158,6 +169,7 @@ class Router:
             await self._batches.add(event)
             return None
         if await self._finops.status(event.tenant_id) is BudgetStatus.EXHAUSTED:
+            logger.info("budget exhausted: rest reply event=%s", event.event_type)
             return replies.rest_message()
         match event.event_type:
             case "action_callback":
@@ -200,6 +212,12 @@ class Router:
             session = None
 
         decision = await self._classify(event, text, session)
+        logger.info(
+            "route=%s topic_shift=%s session=%s",
+            decision.route,
+            decision.topic_shift,
+            "new" if session is None else "kept",
+        )
         if session is None or decision.topic_shift:
             session = await self._sessions.open_fresh(
                 tenant_id=tenant_id, user_id=user_id, topic_type=decision.route

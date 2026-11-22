@@ -80,20 +80,50 @@ async def test_the_phone_button_reads_two_screenshots_and_opens_a_followup(
 
 
 @pytest.mark.parametrize("steps", [("打開設定",), ("打開設定", "點螢幕顯示與亮度")])
-async def test_a_guide_with_fewer_than_three_steps_is_a_busy_reply(
+async def test_a_guide_with_fewer_than_three_steps_still_answers(
     wf: WorkflowRig, steps: tuple[str, ...]
 ) -> None:
     wf.replies["route"] = ROUTE_IOS
     wf.replies["ios_helper"] = _guide("放大字體", *steps)
 
-    assert await wf.say("字太小了") == replies.busy_message()
+    response = await wf.say("字太小了")
+
+    assert len(response.bullets) == len(steps)
+    assert response.bullets[0] == "第1步：打開設定"
+    assert len(wf.knowledge_rows()) == 1
+
+
+async def test_a_guide_without_any_step_is_a_busy_reply_and_logged(
+    wf: WorkflowRig, caplog: pytest.LogCaptureFixture
+) -> None:
+    wf.replies["route"] = ROUTE_IOS
+    wf.replies["ios_helper"] = json.dumps({"title": "放大字體", "steps": ["", " "]})
+
+    with caplog.at_level("WARNING"):
+        assert await wf.say("字太小了") == replies.busy_message()
     assert wf.knowledge_rows() == []
+    assert "workflow=ios_helper" in caplog.text
+    assert "steps:too_short" in caplog.text
 
 
-async def test_a_two_step_screenshot_guide_leaves_the_batch_awaiting_intent(
+async def test_a_reply_cut_off_by_the_token_cap_is_busy_and_says_why(
+    wf: WorkflowRig, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The T5 live bug: Gemini answered 200, thinking ate the cap, the JSON was cut."""
+    wf.replies["route"] = ROUTE_IOS
+    wf.replies["ios_helper"] = '{"title":"清出空間","steps":["打開設'
+
+    with caplog.at_level("WARNING"):
+        assert await wf.say("iPhone空間滿了怎麼辦?") == replies.busy_message()
+    assert "workflow=ios_helper" in caplog.text
+    assert "json_invalid" in caplog.text
+    assert "空間" not in caplog.text
+
+
+async def test_a_broken_screenshot_guide_leaves_the_batch_awaiting_intent(
     wf: WorkflowRig,
 ) -> None:
-    wf.replies["ios_screenshot"] = _guide("關掉通知", "點設定", "點通知")
+    wf.replies["ios_screenshot"] = json.dumps({"title": "關掉通知"})
     batch_id = await wf.photo_batch(2)
 
     assert await wf.tap(batch_id, Intent.IOS) == replies.busy_message()

@@ -82,7 +82,7 @@ async def test_text_and_three_images_reach_the_wire_inline_at_medium_resolution(
     assert system.startswith("你是小幫手")
     assert "上次的文案" in system
     assert body["generationConfig"]["mediaResolution"] == "MEDIA_RESOLUTION_MEDIUM"
-    assert body["generationConfig"]["maxOutputTokens"] == 256
+    assert body["generationConfig"]["maxOutputTokens"] == 256 + 1024  # + LOW thinking headroom
 
 
 async def test_voice_is_uploaded_as_native_ogg(media_store: SqlMediaStore, owner: Owner) -> None:
@@ -125,6 +125,86 @@ async def test_completion_tokens_include_thinking_tokens(
     assert (result.prompt_tokens, result.completion_tokens) == (2000, 420)
 
 
+@pytest.mark.parametrize(
+    ("model", "level", "headroom"),
+    [("gemini-3.8-flash", "LOW", 1024), ("gemini-3.5-flash-lite", "MINIMAL", 512)],
+)
+async def test_thinking_level_is_pinned_per_model_with_its_own_output_headroom(
+    media_store: SqlMediaStore, model: str, level: str, headroom: int
+) -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(req.content))
+        return _ok()
+
+    adapter = gemini_on(handler, media_store, model=model)
+    await adapter.generate(request(TaskCapability.COPYWRITING_TW, max_output_tokens=400))
+
+    config = bodies[0]["generationConfig"]
+    thinking = config["thinkingConfig"]
+    # google-genai 3.6.1 sends the snake_case name; proto JSON accepts either spelling.
+    assert thinking.get("thinkingLevel", thinking.get("thinking_level")) == level
+    # The workflow's cap is the answer alone; thinking must not eat into it.
+    assert config["maxOutputTokens"] == 400 + headroom
+
+
+async def test_a_reply_cut_at_max_tokens_is_reported_and_logged(
+    media_store: SqlMediaStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {"role": "model", "parts": [{"text": '{"title":"清'}]},
+                        "finishReason": "MAX_TOKENS",
+                    }
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 300,
+                    "candidatesTokenCount": 5,
+                    "thoughtsTokenCount": 395,
+                },
+            },
+        )
+
+    with caplog.at_level("WARNING"):
+        result = await _adapter(handler, media_store).generate(
+            request(TaskCapability.COPYWRITING_TW)
+        )
+
+    assert result.finish_reason == "MAX_TOKENS"
+    assert "finish=MAX_TOKENS" in caplog.text
+    assert "thoughts=395" in caplog.text
+    assert "清" not in caplog.text  # never the model's (or May's) text
+
+
+async def test_a_normal_stop_is_quiet(
+    media_store: SqlMediaStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {"role": "model", "parts": [{"text": "好"}]},
+                        "finishReason": "STOP",
+                    }
+                ],
+            },
+        )
+
+    with caplog.at_level("WARNING"):
+        result = await _adapter(handler, media_store).generate(
+            request(TaskCapability.COPYWRITING_TW)
+        )
+    assert result.finish_reason == "STOP"
+    assert caplog.text == ""
+
+
 async def test_missing_asset_sends_nothing(media_store: SqlMediaStore, owner: Owner) -> None:
     bodies, handler = _capture()
     with pytest.raises(LookupError):
@@ -158,7 +238,9 @@ def _error(status: int, message: str, code_name: str) -> Callable[[httpx.Request
             "balance_exhausted",
         ),
         (429, "Resource has been exhausted (e.g. check quota).", "rate_limited"),
-        (503, "The model is overloaded.", "provider_error"),
+        (503, "The model is overloaded.", "overloaded"),
+        (504, "Deadline exceeded.", "overloaded"),
+        (500, "Internal error.", "provider_error"),
     ],
 )
 async def test_api_errors_are_classified(
@@ -168,6 +250,7 @@ async def test_api_errors_are_classified(
     with pytest.raises(LLMUnavailable) as caught:
         await _adapter(handler, media_store).generate(request(TaskCapability.COPYWRITING_TW))
     assert (caught.value.reason, caught.value.provider) == (reason, "gemini")
+    assert caught.value.detail == f"http {status}"
 
 
 async def test_connection_error_becomes_provider_error(media_store: SqlMediaStore) -> None:
